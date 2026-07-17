@@ -1,0 +1,53 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+android {
+    namespace 'com.apfa'
+    compileSdk 34
+    // NDK r21 is the last release whose binaries load below API 21 (r26 refuses
+    // to target <21 outright). It clamps native compilation to android-16 and
+    // links libandroid_support + sysv hash tables, which is what lets the .so
+    // resolve on Gingerbread's linker. Same toolchain Lexon's 2.3 branch shipped.
+    ndkVersion '21.4.7075529'
+
+    defaultConfig {
+        applicationId 'com.apfa'
+        // Android 2.3.3 (Gingerbread). BASS itself needs 2.3.3+, so API 10 is
+        // the true floor, not 9. Below API 19 the app swaps SAF for the
+        // built-in file browser (MainActivity.pickFile).
+        minSdk 10
+        targetSdk 34
+        versionCode 14
+        versionName '1.2.0'
+
+        // arm64-v8a for modern phones; armeabi-v7a for budget devices whose
+        // 64-bit-capable SoC shipped with a 32-bit OS (e.g. LG X410 / SD425).
+        ndk {
+            abiFilters 'arm64-v8a', 'armeabi-v7a'
+        }
+    }
+
+    // Build the native engine (libapfa.so) via CMake.
+    externalNativeBuild {
+        cmake {
+            path 'src/main/cpp/CMakeLists.txt'
+            version '3.22.1'
+        }
+    }
+
+    // Pack the prebuilt BASS / BASSMIDI .so files into the APK.
+    sourceSets {
+        main.jniLibs.srcDirs += ['../bass24-android/libs', '../bassmidi24-android/libs']
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+}
