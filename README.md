@@ -1,4 +1,13 @@
-# aPFA v1.2.0
+# aPFA v1.2.0 Viz
+
+Currently nothing has changed between original aPFA and my fork. I will add features later.
+
+For now, this is only a good source upload instead of it being zipped.
+
+Features coming soon™️.
+
+
+# ORIGINAL README BELOW:
 
 So.. we have many many Black MIDI players for Android, but not one seemingly has tried to replicate PFAs engine...
 UNTIL NOW! 
