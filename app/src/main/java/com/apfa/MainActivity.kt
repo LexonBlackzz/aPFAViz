@@ -3,6 +3,7 @@ package com.apfa
 import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
+import android.app.Dialog
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
@@ -12,6 +13,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.Typeface
+import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.RippleDrawable
 import android.net.Uri
@@ -670,36 +672,90 @@ class MainActivity : Activity() {
     }
 
     private fun showSettingsDialog() {
-        val root = LinearLayout(this).apply {
+        val dialog = Dialog(this)
+        val activityBackdrop = findViewById<View>(android.R.id.content)
+
+        val sheetContent = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(8), dp(16), dp(8))
+            setPadding(dp(20), dp(18), dp(20), dp(18))
         }
+
+        val titleRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        titleRow.addView(TextView(this).apply {
+            text = "Settings"
+            setTextColor(Color.WHITE)
+            textSize = 22f
+            typeface = Typeface.DEFAULT_BOLD
+        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        titleRow.addView(TextView(this).apply {
+            text = "×"
+            contentDescription = "Close settings"
+            setTextColor(Color.rgb(220, 225, 238))
+            textSize = 26f
+            gravity = Gravity.CENTER
+            setOnClickListener { dialog.dismiss() }
+        }, LinearLayout.LayoutParams(dp(44), dp(44)))
+        sheetContent.addView(titleRow)
+
         fun group(title: String) {
-            root.addView(TextView(this).apply {
+            sheetContent.addView(TextView(this).apply {
                 text = title.uppercase()
                 setTextColor(uiAccent2)
-                textSize = 11f
+                textSize = 10f
                 typeface = Typeface.DEFAULT_BOLD
-                letterSpacing = 0.12f
+                letterSpacing = 0.15f
             }, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply { topMargin = dp(12); bottomMargin = dp(4) })
+            ).apply { topMargin = dp(18); bottomMargin = dp(5) })
         }
+
         fun action(title: String, subtitle: String, click: () -> Unit) {
             val row = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(dp(12), dp(10), dp(12), dp(10))
-                setOnClickListener { click() }
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(12), dp(10), dp(8), dp(10))
+                background = GradientDrawable().apply {
+                    cornerRadius = dp(15).toFloat()
+                    setColor(Color.argb(30, 255, 255, 255))
+                }
+                setOnClickListener {
+                    dialog.dismiss()
+                    click()
+                }
             }
-            row.addView(TextView(this).apply {
-                text = title; setTextColor(Color.WHITE); textSize = 14f
+            val copy = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            copy.addView(TextView(this).apply {
+                text = title
+                setTextColor(Color.WHITE)
+                textSize = 14f
                 typeface = Typeface.DEFAULT_BOLD
             })
+            copy.addView(TextView(this).apply {
+                text = subtitle
+                setTextColor(Color.rgb(181, 188, 207))
+                textSize = 12f
+                maxLines = 2
+            }, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(2) })
+            row.addView(copy, LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f
+            ))
             row.addView(TextView(this).apply {
-                text = subtitle; setTextColor(uiMuted); textSize = 12f
-            })
-            root.addView(row)
+                text = "›"
+                setTextColor(Color.rgb(196, 203, 222))
+                textSize = 24f
+                gravity = Gravity.CENTER
+            }, LinearLayout.LayoutParams(dp(30), dp(44)))
+            sheetContent.addView(row, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dp(7) })
         }
 
         group("Performance")
@@ -714,16 +770,76 @@ class MainActivity : Activity() {
         action("aPFA v${appVersion()}", "Starzainia × HexagonMIDIs") {
             AlertDialog.Builder(this)
                 .setTitle("About aPFA")
-                .setMessage("aPFA v${appVersion()}\n\nStarzainia × HexagonMIDIs\n\nA PFA-faithful Android MIDI player.\n\nLiquidGlass Android by pandadog / QWEA0 — MIT License.")
+                .setMessage(
+                    "aPFA v${appVersion()}\n\nStarzainia × HexagonMIDIs\n\n" +
+                    "A PFA-faithful Android MIDI player.\n\n" +
+                    "LiquidGlass Android by pandadog / QWEA0 — MIT License."
+                )
                 .setPositiveButton("OK", null)
                 .show()
         }
 
-        AlertDialog.Builder(this)
-            .setTitle("Settings")
-            .setView(ScrollView(this).apply { addView(root) })
-            .setPositiveButton("Done", null)
-            .show()
+        val glass = LiquidGlassView(this).apply {
+            cornerRadius = dp(30).toFloat()
+            material = GlassMaterial.REGULAR
+            blurAmount = 0.17f
+            saturation = 125f
+            refractionHeight = dp(30).toFloat()
+            bevelWidth = dp(22).toFloat()
+            refractionFalloff = 2.7f
+            dispersionStrength = 0.10f
+            enableSensorHighlight = false
+            enableAdaptiveTint = false
+            enableDynamicBackground = false
+            enablePressEffect = false
+            collectFrameStats = false
+            backdropSource = activityBackdrop
+            setGlassTint(Color.rgb(17, 20, 34), 0.34f)
+            addView(ScrollView(this@MainActivity).apply {
+                overScrollMode = View.OVER_SCROLL_NEVER
+                addView(sheetContent)
+            }, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ))
+        }
+
+        val outer = FrameLayout(this).apply {
+            setPadding(dp(14), dp(14), dp(14), dp(18))
+            addView(glass, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { gravity = Gravity.BOTTOM })
+        }
+
+        dialog.setContentView(outer)
+        dialog.setCanceledOnTouchOutside(true)
+        dialog.window?.apply {
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            setDimAmount(0f)
+            clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+            setWindowAnimations(0)
+            setGravity(Gravity.BOTTOM)
+        }
+        dialog.show()
+        dialog.window?.apply {
+            decorView.setPadding(0, 0, 0, 0)
+            setLayout(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        }
+        animateGlassInDialog(glass)
+    }
+
+    private fun animateGlassInDialog(view: View) {
+        view.alpha = 0f
+        view.translationY = dp(22).toFloat()
+        view.animate()
+            .alpha(1f)
+            .translationY(0f)
+            .setDuration(240L)
+            .start()
     }
 
     // --- Advanced Settings dialog ---------------------------------------------
