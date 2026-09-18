@@ -602,18 +602,6 @@ class MainActivity : Activity() {
             root.addView(row)
         }
 
-        group("Audio")
-        action("SoundFont", soundfontUri?.let { displayName(it) } ?: "No SoundFont") {
-            pickFile(REQ_SOUNDFONT)
-        }
-        action("Voice limit", "$voiceCount voices") { showVoiceInput() }
-
-        group("Visuals")
-        action("Background", if (bgImagePath != null) "Image" else "Solid colour") {
-            showBgColorDialog()
-        }
-        action("Note speed", "%.3f×".format(noteSpeed)) { showSpeedInput() }
-
         group("Performance")
         action("Core affinity", if (cpuMask == 0L) "Auto" else "Custom mask") {
             showCoreAffinityDialog()
