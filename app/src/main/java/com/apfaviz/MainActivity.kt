@@ -235,7 +235,12 @@ class MainActivity : Activity() {
         }
         val page = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(if (portrait) 16 else 28), dp(16), dp(if (portrait) 16 else 28), dp(28))
+            setPadding(
+                dp(if (portrait) 16 else 28),
+                dp(16),
+                dp(if (portrait) 16 else 28),
+                dp(118)
+            )
         }
 
         // Compact header: brand, version, one settings entry.
@@ -425,6 +430,21 @@ class MainActivity : Activity() {
 
         scroll.addView(page, FrameLayout.LayoutParams(mp, wc))
         root.addView(scroll, FrameLayout.LayoutParams(mp, mp))
+
+        val bottomRail = buildBottomActionRail(backdrop)
+        root.addView(bottomRail, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            dp(72)
+        ).apply {
+            gravity = Gravity.BOTTOM
+            setMargins(
+                dp(if (portrait) 16 else 28),
+                0,
+                dp(if (portrait) 16 else 28),
+                dp(14)
+            )
+        })
+
         scroll.viewTreeObserver.addOnScrollChangedListener {
             shellGlassPanels.forEach { it.invalidate() }
         }
@@ -586,28 +606,45 @@ class MainActivity : Activity() {
             textSize = 14f
             typeface = Typeface.DEFAULT_BOLD
         }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+
         val value = TextView(this).apply {
             text = voiceCount.toString()
             setTextColor(uiAccent2)
             textSize = 14f
             typeface = Typeface.DEFAULT_BOLD
-            setPadding(dp(12), dp(8), dp(12), dp(8))
+            setPadding(dp(12), dp(7), dp(12), dp(7))
             setOnClickListener { showVoiceInput() }
         }
+        header.addView(resetAffordance {
+            voiceCount = 250
+            value.text = voiceCount.toString()
+            saveSettings()
+            setContentView(buildSetupScreen())
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(34)).apply {
+            marginEnd = dp(7)
+        })
         header.addView(glassValuePill(value, backdrop))
         parent.addView(header)
-        val bar = SeekBar(this).apply {
+
+        val bar = LensSettingSlider(this).apply {
             max = 499
             progress = (voiceCount - 1).coerceIn(0, 499)
-            minHeight = dp(48)
-            styleShellSeekBar(this)
-            setOnSeekBarChangeListener(simpleListener { p ->
+            contentDescription = "Voice Count"
+            onProgressChanged = { p ->
                 voiceCount = p + 1
                 value.text = voiceCount.toString()
-            })
+            }
+            onStopTracking = {
+                saveSettings()
+            }
         }
-        parent.addView(bar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(48)))
-        parent.addView(rangeLabels("1", "500"))
+        parent.addView(bar, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(38)
+        ).apply { topMargin = dp(4) })
+        parent.addView(rangeLabels("1", "500"), LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = dp(-3) })
     }
 
     private fun addSpeedControl(parent: LinearLayout, backdrop: View) {
@@ -621,38 +658,61 @@ class MainActivity : Activity() {
             textSize = 14f
             typeface = Typeface.DEFAULT_BOLD
         }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+
         val value = TextView(this).apply {
             text = "%.3f×".format(noteSpeed)
             setTextColor(uiAccent2)
             textSize = 14f
             typeface = Typeface.DEFAULT_BOLD
-            setPadding(dp(12), dp(8), dp(12), dp(8))
+            setPadding(dp(12), dp(7), dp(12), dp(7))
             setOnClickListener { showSpeedInput() }
         }
+        header.addView(resetAffordance {
+            noteSpeed = 0.05f
+            value.text = "%.3f×".format(noteSpeed)
+            saveSettings()
+            setContentView(buildSetupScreen())
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(34)).apply {
+            marginEnd = dp(7)
+        })
         header.addView(glassValuePill(value, backdrop))
         parent.addView(header)
-        val bar = SeekBar(this).apply {
+
+        val bar = LensSettingSlider(this).apply {
             max = 1000
             progress = progressFromSpeed(noteSpeed)
-            minHeight = dp(48)
-            styleShellSeekBar(this)
-            setOnSeekBarChangeListener(simpleListener { p ->
+            contentDescription = "Note Speed"
+            onProgressChanged = { p ->
                 noteSpeed = speedFromProgress(p)
                 value.text = "%.3f×".format(noteSpeed)
-            })
+            }
+            onStopTracking = {
+                saveSettings()
+            }
         }
-        parent.addView(bar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(48)))
-        parent.addView(rangeLabels("0.005×", "1.000×"))
+        parent.addView(bar, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(38)
+        ).apply { topMargin = dp(4) })
+        parent.addView(rangeLabels("0.005×", "1.000×"), LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = dp(-3) })
     }
 
     private fun rangeLabels(min: String, max: String): LinearLayout =
         LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(17), 0, dp(17), 0)
             addView(TextView(this@MainActivity).apply {
-                text = min; setTextColor(uiMuted); textSize = 11f
+                text = min
+                setTextColor(Color.rgb(132, 140, 161))
+                textSize = 10f
             }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
             addView(TextView(this@MainActivity).apply {
-                text = max; setTextColor(uiMuted); textSize = 11f; gravity = Gravity.END
+                text = max
+                setTextColor(Color.rgb(132, 140, 161))
+                textSize = 10f
+                gravity = Gravity.END
             }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         }
 
@@ -744,11 +804,125 @@ class MainActivity : Activity() {
         bar.thumbTintList = accent
     }
 
+    private fun buildBottomActionRail(backdrop: View): View {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+        }
+
+        val sf = TextView(this).apply {
+            val name = soundfontUri?.let { displayName(it) } ?: "No SoundFont"
+            text = "SF  •  $name"
+            setTextColor(Color.WHITE)
+            textSize = 12f
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER_VERTICAL
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            setPadding(dp(12), 0, dp(10), 0)
+            background = panelBackground(
+                Color.argb(132, 10, 30, 32), 15, Color.argb(62, 45, 212, 191)
+            )
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { pickFile(REQ_SOUNDFONT) }
+        }
+        row.addView(sf, LinearLayout.LayoutParams(0, dp(52), 1f).apply {
+            marginEnd = dp(8)
+        })
+
+        val open = TextView(this).apply {
+            text = "Open MIDI"
+            setTextColor(Color.WHITE)
+            textSize = 14f
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            background = shellButtonBackground(primary = true)
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { pickFile(REQ_MIDI) }
+        }
+        row.addView(open, LinearLayout.LayoutParams(dp(112), dp(52)).apply {
+            marginEnd = dp(8)
+        })
+
+        val settings = TextView(this).apply {
+            text = "⚙"
+            contentDescription = "Settings"
+            setTextColor(Color.WHITE)
+            textSize = 19f
+            gravity = Gravity.CENTER
+            background = panelBackground(
+                Color.argb(122, 22, 26, 40), 15, Color.argb(68, 255, 255, 255)
+            )
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { showSettingsDialog() }
+        }
+        row.addView(settings, LinearLayout.LayoutParams(dp(52), dp(52)))
+
+        if (!liquidGlassEnabled) {
+            return FrameLayout(this).apply {
+                background = panelBackground(
+                    Color.rgb(16, 19, 30), 24, Color.argb(76, 255, 255, 255)
+                )
+                elevation = dp(12).toFloat()
+                addView(row, FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                ))
+            }
+        }
+
+        return LiquidGlassView(this).apply {
+            cornerRadius = dp(24).toFloat()
+            material = GlassMaterial.REGULAR
+            blurAmount = 0.26f
+            saturation = 145f
+            refractionHeight = dp(14).toFloat()
+            bevelWidth = dp(10).toFloat()
+            refractionFalloff = 3.1f
+            dispersionStrength = 0.035f
+            enableSensorHighlight = false
+            enableAdaptiveTint = false
+            enablePressEffect = false
+            enableDynamicBackground = true
+            collectFrameStats = false
+            backdropSource = backdrop
+            setGlassTint(Color.WHITE, 0.075f)
+            elevation = dp(14).toFloat()
+            addView(row, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            ))
+            shellGlassPanels.add(this)
+        }
+    }
+
+    private fun resetAffordance(onReset: () -> Unit): TextView =
+        TextView(this).apply {
+            text = "RESET"
+            setTextColor(Color.rgb(169, 177, 198))
+            textSize = 9.5f
+            typeface = Typeface.DEFAULT_BOLD
+            letterSpacing = 0.08f
+            gravity = Gravity.CENTER
+            setPadding(dp(10), 0, dp(10), 0)
+            background = panelBackground(
+                Color.argb(92, 30, 34, 48), 12, Color.argb(56, 255, 255, 255)
+            )
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { onReset() }
+        }
+
     private fun sectionTitle(text: String): TextView = TextView(this).apply {
-        this.text = text
-        setTextColor(Color.WHITE)
-        textSize = 19f
+        this.text = text.uppercase()
+        setTextColor(Color.rgb(151, 159, 180))
+        textSize = 10.5f
         typeface = Typeface.DEFAULT_BOLD
+        letterSpacing = 0.13f
     }
 
     private fun settingText(name: String, value: String): String = "$name    $value"
