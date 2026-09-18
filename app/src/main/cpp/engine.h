@@ -1,14 +1,15 @@
-// engine.h — the legit-run engine: one-frame-delayed clock, dispatch, render.
+// engine.h — playback engine.
 //
-// Clock, dispatch, buildVisible, GL render, and eglSwapBuffers all run on ONE
-// engine thread, pinned to the fastest core — exactly as PFA's GameThread runs
-// Logic() and Render() (including Present()) back-to-back on one thread.
-// The vsync stall from eglSwapBuffers enters the clock the same way D3D
-// Present() enters PFA's clock, so GPU cost on slow hardware stretches the
-// frame time faithfully.
+// Normal/full-pool playback separates MIDI scheduling from visual rendering:
+// a dedicated scheduler thread owns BASSMIDI event submission and the song
+// wall-clock, while this engine thread owns GL, visible-note state, and present.
+// A slow eglSwapBuffers therefore cannot bunch MIDI events into visual frames.
+// The 32-bit sliced-streaming fallback stays coupled because only one event
+// slice can be mapped safely at a time.
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -78,8 +79,8 @@ public:
     void start(void* surface);
     void stop();
     void surfaceChanged(int w, int h);
-    void pause()  { paused_ = true; pubNps_.store(0.0f); }
-    void resume() { paused_ = false; }
+    void pause();
+    void resume();
     void seek(int64_t micros);
     void setBgColor(uint32_t bgrColor) { bgColor_.store(bgrColor); }
     // Stretched background image, set from the UI thread. rgba = w*h*4 bytes, row
@@ -112,6 +113,11 @@ private:
     void dispatch();
     void buildVisible();
     void applySeek(int64_t target);
+    void audioMain(int64_t initialUs);
+    void startAudioScheduler(int64_t initialUs, uint64_t affinityMask);
+    void stopAudioScheduler();
+    size_t cursorAfterTime(int64_t target) const;
+    void restoreAudioState(size_t pcCursor);
     // events[pos]'s time without dereferencing it — a sliced streaming load
     // maps only one slice at a time (streamer.h).
     int64_t eventUsAt(size_t pos) const;
@@ -135,13 +141,17 @@ private:
     std::string sfPath_;
 
     std::thread       thread_;
+    std::thread       audioThread_;
     std::atomic<bool> running_{false};
+    std::atomic<bool> audioRun_{false};
+    std::atomic<bool> decoupledAudio_{false};
     std::atomic<bool> paused_{false};
     std::atomic<bool> playing_{false};
     std::atomic<int>  startError_{kStartOk};
     // INT64_MIN = "no pending seek". A plain -1 won't do: PFA's pre-roll makes
     // negative targets (down to firstNoteUs_ - 3,000,000) legitimate seek values.
     std::atomic<int64_t> seekRequest_{INT64_MIN};
+    std::atomic<int64_t> audioSeekRequest_{INT64_MIN};
     std::atomic<int>  surfW_{0}, surfH_{0};
     void*             window_ = nullptr;   // ANativeWindow* (Android) / CAEAGLLayer* (iOS)
 
@@ -166,6 +176,14 @@ private:
     // firstNoteUs_ - 3,000,000 (negative until the first note is reached).
     int64_t  clockUs_  = 0;
     uint64_t lastWall_ = 0;
+
+    // Published by the MIDI scheduler. The visual thread samples this clock;
+    // the streaming read-ahead thread follows it too, so GPU stalls cannot make
+    // storage prefetch lag behind audible playback.
+    std::atomic<int64_t> pubAudioTimeUs_{0};
+    std::mutex audioWaitMutex_;
+    std::condition_variable audioCv_;
+    uint64_t audioAffinityMask_ = 0;
 
     // Surface re-attach support. stop() saves the current clock here; the next
     // start()'s threadMain seeks back to it instead of restarting at the pre-roll,
@@ -212,6 +230,8 @@ private:
     uint64_t polySum_    = 0;    // sum of active_.size() over the window's frames
     uint64_t polyMax_    = 0;
     uint64_t dispEvents_ = 0;    // events consumed by dispatch() this window
+    std::atomic<uint64_t> audioSubmittedWindow_{0};
+    std::atomic<uint64_t> audioLateMaxUs_{0};
     uint64_t majFltLast_ = 0;    // engine-thread major faults at the last tick
     uint64_t ldrFltLast_ = 0;    // loader-thread major faults at the last tick
 };
