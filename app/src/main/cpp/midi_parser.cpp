@@ -1,20 +1,14 @@
 // midi_parser.cpp — see midi_parser.h.
 //
-// Each MIDI note message becomes a PlayEvent appended to eventPool in FILE
-// order — the note-on event the instant the note-on is parsed, the note-off
-// event the instant the note-off is parsed — exactly as PFA does (one heap
-// object per message). This is load-bearing: it leaves note-on events in
-// start-time order, the order the dispatch loop and the O(P) UpdateState scan
-// walk them, so the polyphony hot path streams the pool instead of pointer-
-// chasing it. Building the pool in note-COMPLETION order (pairing on the
-// note-off) instead places every note-on by its END time, scattering every
-// note-on access on the polyphony path — that was aPFA's worse-than-PFA
-// polyphony lag.
+// Each MIDI message becomes a compact PlayEvent appended to eventPool in FILE
+// order — note-on when parsed, note-off when parsed. Keeping parse order retains
+// the useful locality of note-on records while the time-sorted events[] table
+// preserves the exact playback/render ordering.
 //
-// Times are stored as TICKS during parsing and converted to microseconds in
-// place; the `sister` field holds the paired event's INDEX until a final pass
-// turns it into a pointer. events[] is the time-sorted pointer table walked at
-// playback (note.h — this layout IS the cache behaviour).
+// Times are stored as TICKS in absMicroSec during parsing and converted to
+// microseconds in place. Note-on/off link fields initially hold partner POOL
+// indices; after sorting they are remapped to partner positions in events[].
+// No runtime sister pointer is stored inside the 16-byte event.
 #include "midi_parser.h"
 
 #include <algorithm>
