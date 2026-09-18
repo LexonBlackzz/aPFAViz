@@ -210,6 +210,10 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
                     }
                 }
             }
+            // Reset the peak at the exact start of native parsing so the
+            // "Peak" number describes MIDI load/parse memory, not a preceding
+            // cache/SFZ copy spike.
+            loadPeakMemoryBytes = nativeGetProcessMemoryBytes().coerceAtLeast(0L)
             val ok = nativeLoad(midiPath, sfPath, voiceCount, noteSpeed, cpuMask, legacy,
                                 chunked, poolDir)
             // Decode + upload the background image off the UI thread (it can be big).
