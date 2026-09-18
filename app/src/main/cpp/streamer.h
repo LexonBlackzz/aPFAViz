@@ -96,12 +96,10 @@ namespace apfa {
 // single free run was only 980 MB against a 1564 MB pool. Split across the
 // four largest gaps it fits with room to spare.
 //
-// Splitting is safe because nothing outside the loader ever treats the pool as
-// one flat array: the engine reaches events only through events[] and through
-// `sister`, both of which hold real PlayEvent pointers baked in during pass B.
-// Segment boundaries are multiples of lcm(sizeof(PlayEvent), page size), so no
-// event ever straddles two segments, and the hot path compiles to exactly the
-// same code walking exactly the same addresses.
+// Splitting is safe because the engine reaches events through the time-order
+// events[] table, while note pairing is held separately as compact position
+// metadata. Segment boundaries are multiples of lcm(sizeof(PlayEvent), page
+// size), so no compact event ever straddles two segments.
 // ---- sliced pool (32-bit only; see SLICED-POOL-DESIGN.md) -------------------
 //
 // One slice of the song. Its pool holds, laid out track by track exactly as the
@@ -112,9 +110,9 @@ namespace apfa {
 //   * CARRY-OUT, a copy of the note-off of every body note-on that ends at or
 //     after endPos, so that every note-on's `sister` resolves inside its own
 //     slice.
-// With all three, `events[]` and `sister` are real PlayEvent pointers for the
-// whole time the slice is mapped, which is what keeps dispatch()/buildVisible()
-// untouched and the hot path free.
+// With the body/carry materialised, events[] positions needed by dispatch,
+// active-note scans and the visible window have live PlayEvent pointers for the
+// lifetime of the slice. Note pairing itself remains integer position metadata.
 struct SlicePlan {
     uint32_t firstPos  = 0;   // first body position in the time-sorted walk
     uint32_t endPos    = 0;   // one past the last body position
@@ -230,8 +228,8 @@ public:
     // (Android's FUSE layer hides the real type behind its own magic).
     bool fileTooBig() const { return fileTooBig_; }
     // True when the last open() failed because the pool's virtual address
-    // range could not be reserved. The pool is ONE contiguous VA reservation
-    // (sister pointers are precomputed against its base), so a 32-bit process
+    // range could not be reserved. The full-pool path still prefers large
+    // virtual-address reservations for direct event pointers, so a 32-bit process
     // — a 64-bit SoC running a 32-bit ROM very much included — tops out around
     // 2-3 GB of user address space for everything. Distinct from the other two
     // because falling back to the in-RAM parse cannot help: a MIDI whose pool
