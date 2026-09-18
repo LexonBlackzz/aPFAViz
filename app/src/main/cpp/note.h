@@ -10,10 +10,11 @@
 // scan, visible time window and event ordering remain unchanged. The reduction
 // is representation/cache traffic only.
 //
-// link is intentionally integer-based rather than a pointer:
-//   in the in-RAM parser after sorting: partner position in events[].
-//   in Streamer's backing pool: partner pool index (Streamer keeps its own
-//   compact position-link table for playback/slicing).
+// link is intentionally payload data rather than a pointer:
+//   note-on: absolute note end time in microseconds.
+//   all other events: kNoEventLink.
+// Streamer keeps its own compact partner-position table only for slicing and
+// seek reconstruction; the playback/render hot path never follows it.
 //
 // absMicroSec is 32-bit because the parser already clamps every event timestamp
 // to UINT32_MAX; this does not reduce the range aPFAViz supported before.
@@ -41,7 +42,7 @@ enum ChannelEventType {
 
 struct PlayEvent {
     uint32_t absMicroSec;      // absolute event time (µs), clamped to UINT32_MAX
-    uint32_t link;             // partner position/index; semantics documented above
+    uint32_t link;             // note-on end time (µs), else kNoEventLink
     uint16_t track;            // SMF track number (header field is 16-bit)
     uint8_t  eventCode;        // raw MIDI status byte
     uint8_t  param1;           // key / controller / program
