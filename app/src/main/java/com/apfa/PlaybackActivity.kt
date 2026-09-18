@@ -593,9 +593,8 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
     //
     // Two routes, best first:
     //   1. Hand BASSMIDI the file where it already lives. Costs nothing and the
-    //      samples resolve themselves. Covers the pre-SAF browser's file:// URIs
-    //      and any content:// URI still readable as a path (i.e. below API 29,
-    //      before scoped storage).
+    //      samples resolve themselves. Covers providers whose document URI can
+    //      still be resolved to a readable filesystem path (typically API 23-28).
     //   2. Rebuild the instrument in the cache: copy the .sfz, parse it, and
     //      pull every file it names through the same provider, preserving the
     //      relative layout so the paths inside the .sfz stay correct.
@@ -619,10 +618,9 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
     /**
      * The real filesystem path behind a picked URI, or null.
      *
-     * Deliberately does NOT use DocumentsContract: that class is API 19+ and
-     * this app's floor is API 10, where merely naming a missing class inside a
-     * method body can upset Dalvik's verifier. Everything here is Uri string
-     * work, which is API 1.
+     * This stays as provider-agnostic Uri string work because several OEM
+     * document providers use the same document-id shape without behaving
+     * exactly like ExternalStorageProvider.
      */
     private fun resolveLocalPath(uri: Uri): String? {
         if ("file".equals(uri.scheme, ignoreCase = true)) return uri.path
