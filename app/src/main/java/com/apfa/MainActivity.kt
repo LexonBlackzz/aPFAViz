@@ -120,7 +120,6 @@ class MainActivity : Activity() {
     // Profile waiting to be written out by the ACTION_CREATE_DOCUMENT result.
     private var pendingExport: JSONObject? = null
 
-    private lateinit var midiButton: Button
     private lateinit var soundfontButton: Button
 
     private data class RecentMidi(val uri: Uri, val name: String)
@@ -251,12 +250,12 @@ class MainActivity : Activity() {
             textSize = 18f
             typeface = Typeface.DEFAULT_BOLD
         }, LinearLayout.LayoutParams(mp, wc).apply { topMargin = dp(4) })
-        midiButton = Button(this).apply {
-            text = "Open MIDI"
-            setOnClickListener { pickFile(REQ_MIDI) }
+        val openAction = glassActionButton(backdrop, "Open MIDI") {
+            pickFile(REQ_MIDI)
         }
-        styleShellButton(midiButton, primary = true)
-        openCard.addView(midiButton, LinearLayout.LayoutParams(mp, dp(56)).apply { topMargin = dp(18) })
+        openCard.addView(openAction, LinearLayout.LayoutParams(mp, dp(56)).apply {
+            topMargin = dp(18)
+        })
         page.addView(glassPanel(openCard, backdrop, accented = true),
             LinearLayout.LayoutParams(mp, wc))
 
@@ -302,7 +301,6 @@ class MainActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(14), dp(8), dp(10), dp(8))
-            setOnClickListener { pickFile(REQ_SOUNDFONT) }
         }
         sfRow.addView(TextView(this).apply {
             text = "SF"
@@ -320,7 +318,6 @@ class MainActivity : Activity() {
             background = null
             maxLines = 1
             ellipsize = android.text.TextUtils.TruncateAt.END
-            setOnClickListener { pickFile(REQ_SOUNDFONT) }
         }
         sfRow.addView(soundfontButton, LinearLayout.LayoutParams(0, dp(48), 1f))
         sfRow.addView(TextView(this).apply {
@@ -329,7 +326,15 @@ class MainActivity : Activity() {
             textSize = 24f
             gravity = Gravity.CENTER
         }, LinearLayout.LayoutParams(dp(28), dp(48)))
-        page.addView(glassPanel(sfRow, backdrop, cornerDp = 18))
+        val sfGlass = glassPanel(sfRow, backdrop, cornerDp = 18).apply {
+            isClickable = true
+            isFocusable = true
+            enablePressEffect = true
+            pressScale = 0.99f
+            elasticity = 0.48f
+            setOnClickListener { pickFile(REQ_SOUNDFONT) }
+        }
+        page.addView(sfGlass)
 
         // Quick settings: exact value is tappable; slider retains fast tuning.
         page.addView(sectionTitle("Quick settings"), LinearLayout.LayoutParams(mp, wc).apply {
@@ -390,6 +395,43 @@ class MainActivity : Activity() {
         return root
     }
 
+    private fun glassActionButton(
+        backdrop: View,
+        label: String,
+        click: () -> Unit
+    ): LiquidGlassView =
+        LiquidGlassView(this).apply {
+            cornerRadius = dp(17).toFloat()
+            material = GlassMaterial.CLEAR
+            blurAmount = 0.12f
+            saturation = 128f
+            refractionHeight = dp(19).toFloat()
+            bevelWidth = dp(15).toFloat()
+            refractionFalloff = 2.7f
+            dispersionStrength = 0.12f
+            enablePressEffect = true
+            pressScale = 0.99f
+            elasticity = 0.56f
+            enableDynamicBackground = false
+            collectFrameStats = false
+            backdropSource = backdrop
+            setGlassTint(uiAccent, 0.50f)
+            isClickable = true
+            isFocusable = true
+            addView(TextView(this@MainActivity).apply {
+                text = label
+                gravity = Gravity.CENTER
+                setTextColor(Color.WHITE)
+                textSize = 15f
+                typeface = Typeface.DEFAULT_BOLD
+            }, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            ))
+            setOnClickListener { click() }
+            shellGlassPanels.add(this)
+        }
+
     private fun glassIconControl(
         backdrop: View,
         glyph: String,
@@ -406,7 +448,8 @@ class MainActivity : Activity() {
             refractionFalloff = 2.7f
             dispersionStrength = 0.09f
             enablePressEffect = true
-            pressScale = 0.92f
+            pressScale = 0.99f
+            elasticity = 0.52f
             enableDynamicBackground = false
             collectFrameStats = false
             backdropSource = backdrop
@@ -438,16 +481,21 @@ class MainActivity : Activity() {
             refractionFalloff = 2.6f
             dispersionStrength = 0.055f
             enablePressEffect = true
-            pressScale = 0.95f
+            pressScale = 0.995f
+            elasticity = 0.50f
             enableDynamicBackground = false
             collectFrameStats = false
             backdropSource = backdrop
-            setGlassTint(uiAccent2, 0.12f)
+            setGlassTint(uiAccent2, 0.16f)
+            isClickable = true
+            isFocusable = true
+            label.isClickable = false
             addView(label, FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 dp(40),
                 Gravity.CENTER
             ))
+            setOnClickListener { label.performClick() }
             shellGlassPanels.add(this)
         }
 
@@ -469,7 +517,9 @@ class MainActivity : Activity() {
             dispersionStrength = if (accented) 0.13f else 0.075f
             enableSensorHighlight = false
             enableAdaptiveTint = false
-            enablePressEffect = false
+            enablePressEffect = true
+            pressScale = 0.997f
+            elasticity = 0.22f
             collectFrameStats = false
             // We invalidate these panels from the ScrollView's scroll callback
             // instead of continuously redrawing them while the launcher is idle.
@@ -720,11 +770,8 @@ class MainActivity : Activity() {
                 setPadding(dp(12), dp(10), dp(8), dp(10))
                 background = GradientDrawable().apply {
                     cornerRadius = dp(15).toFloat()
-                    setColor(Color.argb(30, 255, 255, 255))
-                }
-                setOnClickListener {
-                    dialog.dismiss()
-                    click()
+                    setColor(Color.argb(72, 6, 9, 18))
+                    setStroke(dp(1), Color.argb(58, 255, 255, 255))
                 }
             }
             val copy = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -736,7 +783,7 @@ class MainActivity : Activity() {
             })
             copy.addView(TextView(this).apply {
                 text = subtitle
-                setTextColor(Color.rgb(181, 188, 207))
+                setTextColor(Color.rgb(205, 211, 226))
                 textSize = 12f
                 maxLines = 2
             }, LinearLayout.LayoutParams(
@@ -752,10 +799,38 @@ class MainActivity : Activity() {
                 textSize = 24f
                 gravity = Gravity.CENTER
             }, LinearLayout.LayoutParams(dp(30), dp(44)))
-            sheetContent.addView(row, LinearLayout.LayoutParams(
+            val rowGlass = LiquidGlassView(this).apply {
+                cornerRadius = dp(16).toFloat()
+                material = GlassMaterial.CLEAR
+                blurAmount = 0.10f
+                saturation = 116f
+                refractionHeight = dp(13).toFloat()
+                bevelWidth = dp(11).toFloat()
+                refractionFalloff = 2.7f
+                dispersionStrength = 0.065f
+                enablePressEffect = true
+                pressScale = 0.995f
+                elasticity = 0.48f
+                enableDynamicBackground = false
+                collectFrameStats = false
+                backdropSource = activityBackdrop
+                setGlassTint(Color.rgb(9, 12, 22), 0.46f)
+                isClickable = true
+                isFocusable = true
+                addView(row, FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ))
+                setOnClickListener {
+                    dialog.dismiss()
+                    click()
+                }
+            }
+            row.isClickable = false
+            sheetContent.addView(rowGlass, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply { bottomMargin = dp(7) })
+            ).apply { bottomMargin = dp(8) })
         }
 
         group("Performance")
@@ -782,9 +857,9 @@ class MainActivity : Activity() {
         val glass = LiquidGlassView(this).apply {
             cornerRadius = dp(30).toFloat()
             material = GlassMaterial.REGULAR
-            blurAmount = 0.17f
-            saturation = 125f
-            refractionHeight = dp(30).toFloat()
+            blurAmount = 0.22f
+            saturation = 112f
+            refractionHeight = dp(27).toFloat()
             bevelWidth = dp(22).toFloat()
             refractionFalloff = 2.7f
             dispersionStrength = 0.10f
@@ -794,7 +869,7 @@ class MainActivity : Activity() {
             enablePressEffect = false
             collectFrameStats = false
             backdropSource = activityBackdrop
-            setGlassTint(Color.rgb(17, 20, 34), 0.34f)
+            setGlassTint(Color.rgb(8, 10, 20), 0.62f)
             addView(ScrollView(this@MainActivity).apply {
                 overScrollMode = View.OVER_SCROLL_NEVER
                 addView(sheetContent)
@@ -816,8 +891,8 @@ class MainActivity : Activity() {
         dialog.setCanceledOnTouchOutside(true)
         dialog.window?.apply {
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-            setDimAmount(0f)
-            clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+            addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+            setDimAmount(0.34f)
             setWindowAnimations(0)
             setGravity(Gravity.BOTTOM)
         }
