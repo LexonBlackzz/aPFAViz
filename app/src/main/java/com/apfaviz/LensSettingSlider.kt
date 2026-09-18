@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.RectF
 import android.util.AttributeSet
 import android.view.MotionEvent
@@ -76,6 +77,7 @@ class LensSettingSlider @JvmOverloads constructor(
     private val r = RectF()
     private val thumb = RectF()
     private val hi = RectF()
+    private val clipPath = Path()
 
     init {
         isClickable = true
@@ -120,7 +122,14 @@ class LensSettingSlider @JvmOverloads constructor(
         canvas.drawRoundRect(thumb, thumbH * 0.5f, thumbH * 0.5f, glass)
 
         val save = canvas.save()
-        canvas.clipRoundRect(thumb, thumbH * 0.5f, thumbH * 0.5f)
+        clipPath.reset()
+        clipPath.addRoundRect(
+            thumb,
+            thumbH * 0.5f,
+            thumbH * 0.5f,
+            Path.Direction.CW
+        )
+        canvas.clipPath(clipPath)
         val lensY = cy + dp(0.5f)
         val lensH = dp(5.5f)
         r.set(l, lensY - lensH * 0.5f, rr, lensY + lensH * 0.5f)
