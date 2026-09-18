@@ -681,6 +681,11 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
                 setStroke(dp(1), Color.argb(80, 45, 212, 191))
             }
             elevation = dp(7).toFloat()
+            setOnTouchListener { _, event ->
+                if (event.actionMasked == android.view.MotionEvent.ACTION_DOWN)
+                    showTransportAndSchedule()
+                true
+            }
         }
         root.addView(statsPanel, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -777,6 +782,13 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
             .alpha(0f)
             .setDuration(220L)
             .start()
+        if (::statsPanel.isInitialized) {
+            statsPanel.animate().cancel()
+            statsPanel.animate()
+                .translationY(-dp(74).toFloat())
+                .setDuration(220L)
+                .start()
+        }
     }
 
     private fun showTransportAndSchedule() {
@@ -791,6 +803,13 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
             .alpha(1f)
             .setDuration(180L)
             .start()
+        if (::statsPanel.isInitialized) {
+            statsPanel.animate().cancel()
+            statsPanel.animate()
+                .translationY(0f)
+                .setDuration(180L)
+                .start()
+        }
         ui.postDelayed(hideChromeRunnable, CHROME_HIDE_DELAY_MS)
     }
 
