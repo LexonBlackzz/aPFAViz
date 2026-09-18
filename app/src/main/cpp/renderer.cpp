@@ -422,7 +422,7 @@ void RendererES2::buildFontTexture() {
 bool RendererES2::buildPrograms() {
     static const AttrBind noteB[] = {
         {0,"aQuad"},{1,"aStartSec"},{2,"aDurSec"},{3,"aKeyXW"},
-        {4,"aColorPrimary"},{5,"aColorDark"},{6,"aColorVeryDark"},{7,"aIsSharp"} };
+        {4,"aColorPrimary"} };
     static const AttrBind rectB[] = { {0,"aQuad"},{1,"aRect"},{2,"aColor"} };
     static const AttrBind gradB[] = {
         {0,"aQuad"},{1,"aRect"},{2,"aCTL"},{3,"aCTR"},{4,"aCBR"},{5,"aCBL"} };
@@ -432,7 +432,7 @@ bool RendererES2::buildPrograms() {
     static const AttrBind textB[] = { {0,"aQuad"},{1,"aPos"},{2,"aU"},{3,"aColor"} };
     static const AttrBind bgB[]   = { {0,"aQuad"} };
 
-    noteProg_ = linkProgram(kNoteVS, kNoteFS, noteB, 8);
+    noteProg_ = linkProgram(kNoteVS, kNoteFS, noteB, 5);
     rectProg_ = linkProgram(kRectVS, kRectFS, rectB, 3);
     gradProg_ = linkProgram(kGradVS, kGradFS, gradB, 6);
     skewProg_ = linkProgram(kSkewVS, kSkewFS, skewB, 9);
