@@ -12,7 +12,7 @@
 //                    note-on already left the buffer become fixups.
 //   Pass C (patch) — applies the fixups to the pool file in sorted chunks.
 //   Pass D (sort)  — builds the time-sorted events[] exactly like
-//                    midi_parser.cpp's stable_sort (same keys, same tie-break
+//                    midi_parser.cpp's deterministic sort (same keys, same tie-break
 //                    = pool order), plus programChangeIdx, sisterPos, and the
 //                    sampled time indexes the loader navigates by.
 //
@@ -495,10 +495,10 @@ struct EmitSink {
         if (errno == EFBIG) fileTooBig = true;
     }
 
-    // Sort keys. chunked=false (the automatic path): runBuf holds EVERY key
-    // until pass D — 12 B/event resident, the load transient that caps
-    // un-chunked streaming at ~80 M notes on an 8 GB phone (it's what lmkd
-    // killed at 78% on NoK 90M). chunked=true ("Chunked Disk Streaming"):
+    // Sort keys. chunked=false: runBuf holds EVERY 12-byte key until pass D.
+    // Larger loads are automatically switched to the bounded disk-backed path;
+    // the Advanced Settings switch can force that path for smaller loads too.
+    // chunked=true:
     // keys spill to disk in pre-sorted 32 MB runs and a k-way merge in pass D
     // consumes them — no transient, storage-bound only.
     bool     chunked = false;
@@ -992,8 +992,8 @@ bool Streamer::open(const std::string& midiPath, MidiData& out,
     // every one of them needs a contiguous run of its OWN:
     //
     //   events[]    totalEvents * sizeof(PlayEvent*)  held all session
-    //   sisterPos_  totalEvents * 4                   held all session
-    //   inv[]       totalEvents * 4                   through pass D
+    //   sisterPos_  totalEvents * 4    sliced only    held all session
+    //   inv[]       totalEvents * 4    sliced only    through pass D
     //   poolIdx_    totalEvents * 4    sliced only    held all session
     //   posUs_      totalEvents * 4    sliced only    held all session
     //   the sort    emit.runBuf, 12 B/event in ONE block when un-chunked;
@@ -1405,7 +1405,7 @@ bool Streamer::open(const std::string& midiPath, MidiData& out,
     }
 
     // ---- pass D: sorted keys -> events[], pcIdx, samples ----
-    // Same total order as midi_parser.cpp's stable_sort: (µs, track,
+    // Same total order as midi_parser.cpp's deterministic sort: (µs, track,
     // channelEventType DESC), ties broken by pool index = parse order.
     // us<<19 | track<<3 | (14-chType) packs all three keys; idx is the tie.
     // Un-chunked: one linear walk over the whole sorted key table (resident
