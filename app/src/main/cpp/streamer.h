@@ -296,8 +296,8 @@ public:
     // BEFORE committing to it — 0 on failure/empty.
     static uint64_t predictEventCount(const std::string& midiPath);
 
-    // Raw compact link metadata for an events[] position. This stays resident
-    // even when the backing event page is cold or, in sliced mode, unmapped.
+    // Sliced-mode partner metadata. Normal full-pool streaming no longer
+    // allocates this table: note-ons carry their end timestamp directly.
     uint32_t sisterPosAt(size_t pos) const { return sisterPos_[pos]; }
     uint32_t partnerPosAt(size_t pos) const {
         uint32_t v = sisterPos_[pos];
@@ -456,7 +456,7 @@ private:
     std::vector<std::string> tempPaths_;
 
     // ---- resident tables ----
-    std::vector<uint32_t>    sisterPos_;     // compact bidirectional link metadata
+    std::vector<uint32_t>    sisterPos_;     // sliced mode only
     std::vector<TrackRange>  trackRange_;    // pool-index span per track
     std::vector<uint32_t>    trackSampleOff_;// per-track offset into trackSamples_
     std::vector<TrackSample> trackSamples_;  // every kTrackSampleStep events
@@ -484,10 +484,10 @@ private:
     size_t               frontPos_ = 0;        // events[] positions already scanned
     size_t               backPos_  = 0;
     size_t               adviseCursor_ = 0;    // rotating track start (see tick)
-    // Pages of note-ons that are still sounding after the window has moved
-    // past them (long notes): page address -> events[] position of the
-    // note-off, after which the pin is dropped. Re-touched every tick so
-    // neither our DONTNEED nor kernel reclaim cools them under the O(P) scan.
+    // Pages of note-ons still sounding after the window moved past them:
+    // page address -> absolute note end time (µs). Using time instead of a
+    // partner position means the loader does not need sisterPos_ outside the
+    // special 32-bit sliced path.
     std::unordered_map<uintptr_t, uint32_t> pinnedPages_;
 
     static constexpr size_t  kTrackSampleStep = 4096;    // events per track sample
