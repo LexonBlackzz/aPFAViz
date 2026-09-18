@@ -228,13 +228,7 @@ class MainActivity : Activity() {
             setTextColor(uiMuted)
             textSize = 12f
         }, LinearLayout.LayoutParams(0, wc, 1f))
-        val gear = Button(this).apply {
-            text = "⚙"
-            contentDescription = "Settings"
-            textSize = 20f
-            setOnClickListener { showSettingsDialog() }
-        }
-        styleShellButton(gear, primary = false, compact = true)
+        val gear = glassIconControl(backdrop, "⚙", "Settings") { showSettingsDialog() }
         header.addView(gear, LinearLayout.LayoutParams(dp(48), dp(48)))
         page.addView(header, LinearLayout.LayoutParams(mp, wc).apply { bottomMargin = dp(20) })
 
@@ -345,11 +339,11 @@ class MainActivity : Activity() {
             setPadding(dp(16), dp(16), dp(16), dp(16))
         }
 
-        addVoiceControl(quick)
+        addVoiceControl(quick, backdrop)
         quick.addView(View(this).apply {
             setBackgroundColor(Color.argb(36,255,255,255))
         }, LinearLayout.LayoutParams(mp, dp(1)).apply { topMargin = dp(12); bottomMargin = dp(12) })
-        addSpeedControl(quick)
+        addSpeedControl(quick, backdrop)
 
         val bgRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -394,6 +388,67 @@ class MainActivity : Activity() {
         return root
     }
 
+    private fun glassIconControl(
+        backdrop: View,
+        glyph: String,
+        description: String,
+        click: () -> Unit
+    ): LiquidGlassView =
+        LiquidGlassView(this).apply {
+            cornerRadius = dp(16).toFloat()
+            material = GlassMaterial.CLEAR
+            blurAmount = 0.10f
+            saturation = 122f
+            refractionHeight = dp(15).toFloat()
+            bevelWidth = dp(12).toFloat()
+            refractionFalloff = 2.7f
+            dispersionStrength = 0.09f
+            enablePressEffect = true
+            pressScale = 0.92f
+            enableDynamicBackground = false
+            collectFrameStats = false
+            backdropSource = backdrop
+            setGlassTint(Color.rgb(27, 31, 47), 0.30f)
+            isClickable = true
+            isFocusable = true
+            contentDescription = description
+            addView(TextView(this@MainActivity).apply {
+                text = glyph
+                setTextColor(Color.WHITE)
+                textSize = 20f
+                gravity = Gravity.CENTER
+            }, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            ))
+            setOnClickListener { click() }
+            shellGlassPanels.add(this)
+        }
+
+    private fun glassValuePill(label: TextView, backdrop: View): LiquidGlassView =
+        LiquidGlassView(this).apply {
+            cornerRadius = dp(14).toFloat()
+            material = GlassMaterial.CLEAR
+            blurAmount = 0.075f
+            saturation = 120f
+            refractionHeight = dp(11).toFloat()
+            bevelWidth = dp(10).toFloat()
+            refractionFalloff = 2.6f
+            dispersionStrength = 0.055f
+            enablePressEffect = true
+            pressScale = 0.95f
+            enableDynamicBackground = false
+            collectFrameStats = false
+            backdropSource = backdrop
+            setGlassTint(uiAccent2, 0.12f)
+            addView(label, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                dp(40),
+                Gravity.CENTER
+            ))
+            shellGlassPanels.add(this)
+        }
+
     private fun glassPanel(
         content: View,
         backdrop: View,
@@ -404,12 +459,12 @@ class MainActivity : Activity() {
             cornerRadius = dp(cornerDp).toFloat()
             elevation = dp(if (accented) 8 else 5).toFloat()
             material = GlassMaterial.REGULAR
-            blurAmount = if (accented) 0.11f else 0.085f
-            saturation = 118f
-            refractionHeight = dp(if (accented) 24 else 18).toFloat()
-            bevelWidth = dp(18).toFloat()
-            refractionFalloff = 2.4f
-            dispersionStrength = if (accented) 0.10f else 0.065f
+            blurAmount = if (accented) 0.14f else 0.10f
+            saturation = 124f
+            refractionHeight = dp(if (accented) 30 else 21).toFloat()
+            bevelWidth = dp(if (accented) 22 else 18).toFloat()
+            refractionFalloff = 2.6f
+            dispersionStrength = if (accented) 0.13f else 0.075f
             enableSensorHighlight = false
             enableAdaptiveTint = false
             enablePressEffect = false
@@ -420,7 +475,7 @@ class MainActivity : Activity() {
             backdropSource = backdrop
             setGlassTint(
                 if (accented) uiAccent else Color.rgb(18, 21, 32),
-                if (accented) 0.12f else 0.28f
+                if (accented) 0.18f else 0.24f
             )
             addView(content, FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -429,7 +484,7 @@ class MainActivity : Activity() {
             shellGlassPanels.add(this)
         }
 
-    private fun addVoiceControl(parent: LinearLayout) {
+    private fun addVoiceControl(parent: LinearLayout, backdrop: View) {
         val header = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -448,7 +503,7 @@ class MainActivity : Activity() {
             setPadding(dp(12), dp(8), dp(12), dp(8))
             setOnClickListener { showVoiceInput() }
         }
-        header.addView(value)
+        header.addView(glassValuePill(value, backdrop))
         parent.addView(header)
         val bar = SeekBar(this).apply {
             max = 499
@@ -464,7 +519,7 @@ class MainActivity : Activity() {
         parent.addView(rangeLabels("1", "500"))
     }
 
-    private fun addSpeedControl(parent: LinearLayout) {
+    private fun addSpeedControl(parent: LinearLayout, backdrop: View) {
         val header = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -483,7 +538,7 @@ class MainActivity : Activity() {
             setPadding(dp(12), dp(8), dp(12), dp(8))
             setOnClickListener { showSpeedInput() }
         }
-        header.addView(value)
+        header.addView(glassValuePill(value, backdrop))
         parent.addView(header)
         val bar = SeekBar(this).apply {
             max = 1000
