@@ -233,33 +233,23 @@ void Synth::allNotesOff() {
     flush();
 }
 
-// --- immediate raw call path ------------------------------------------------
-// Fire BASS_MIDI_StreamEvents immediately per note using raw MIDI bytes,
-// same timing as before but no struct overhead — BASSMIDI decodes raw bytes
-// directly, same as OmniMIDI's SendDirectData path.
+// --- batched raw call path --------------------------------------------------
+// Preserve every raw MIDI message and its order, but amortise the BASS API call
+// overhead. The engine already dispatches all events due for a frame in one
+// tight loop; flush() is its existing frame boundary. A 64 KiB hard boundary
+// prevents a catch-up frame from building an unbounded temporary packet.
 
 void Synth::sendRaw(uint8_t status, uint8_t d1, uint8_t d2) {
     if (!midiStream_) return;
-    uint8_t buf[3] = { status, d1, d2 };
-    
-    // Program Change (0xC0) and Channel Aftertouch (0xD0) are 2-byte messages.
-    // BASS_MIDI_EVENTS_RAW reads sequentially; sending a 3rd byte (d2=0) would
-    // be parsed as running status data (e.g. Program Change 0) and instantly undo
-    // the instrument change!
-    int len = ((status & 0xF0) == 0xC0 || (status & 0xF0) == 0xD0) ? 2 : 3;
 
-    // Keep the diagnostic without making it part of every MIDI event's cost.
-    // One call in 1024 is timed; the sample average is scaled to the full count
-    // when the 500 ms perf log asks for it.
+    const bool shortMsg = ((status & 0xF0) == 0xC0 || (status & 0xF0) == 0xD0);
+    const size_t len = shortMsg ? 2u : 3u;
+    if (rawBatch_.size() + len > kRawBatchBytes) flush();
+
+    rawBatch_.push_back(status);
+    rawBatch_.push_back(d1);
+    if (!shortMsg) rawBatch_.push_back(d2);
     ++evCalls_;
-    if ((evCalls_ & 1023u) == 1u) {
-        uint64_t t0 = nowUs();
-        BASS_MIDI_StreamEvents(midiStream_, BASS_MIDI_EVENTS_RAW | BASS_MIDI_EVENTS_ASYNC, buf, len);
-        evSampleMicros_ += nowUs() - t0;
-        ++evSamples_;
-    } else {
-        BASS_MIDI_StreamEvents(midiStream_, BASS_MIDI_EVENTS_RAW | BASS_MIDI_EVENTS_ASYNC, buf, len);
-    }
 }
 
 void Synth::noteOn(int channel, int key, int velocity) {
@@ -275,22 +265,29 @@ void Synth::noteOff(int channel, int key) {
 }
 
 void Synth::flush() {
-    // Nothing to flush — events fire immediately. Kept for call-site compat.
+    if (!midiStream_ || rawBatch_.empty()) return;
+    const uint64_t t0 = nowUs();
+    BASS_MIDI_StreamEvents(
+        midiStream_,
+        BASS_MIDI_EVENTS_RAW | BASS_MIDI_EVENTS_ASYNC,
+        rawBatch_.data(),
+        static_cast<DWORD>(rawBatch_.size()));
+    evMicros_ += nowUs() - t0;
+    ++bassCalls_;
+    rawBatch_.clear();
 }
 
 void Synth::sampleEventCost(uint64_t& calls, uint64_t& micros, uint64_t& bpMicros) {
     calls = evCalls_;
-    if (evSamples_ != 0 && calls != 0)
-        micros = (evSampleMicros_ * calls) / evSamples_;
-    else
-        micros = 0;
-    bpMicros = 0;
+    micros = evMicros_;
+    bpMicros = bassCalls_;   // reused by Engine's perf log as batch-call count
     evCalls_ = 0;
-    evSampleMicros_ = 0;
-    evSamples_ = 0;
+    bassCalls_ = 0;
+    evMicros_ = 0;
 }
 
 void Synth::shutdown() {
+    rawBatch_.clear();
     ready_ = false;
     stopGuard();   // must go first: guardMain dereferences midiStream_
     if (midiStream_) { BASS_StreamFree(midiStream_); midiStream_ = 0; }
