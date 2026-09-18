@@ -2490,13 +2490,27 @@ void Streamer::loaderTickLocked(int64_t t) {
     if (newFront > frontPos_) frontPos_ = newFront;
 
     // Back-edge scan: note-ons leaving the window that are STILL sounding
-    // get pinned until their direct end timestamp. No partner-position table is
-    // needed for the normal full-pool path.
+    // get pinned until their absolute end timestamp.
     size_t newBack = std::min(coarsePosOf(t - backUs_), n);
     for (size_t pos = backPos_; pos < newBack; pos++) {
         const PlayEvent* e = ev[pos];
-        if (e && e->isNoteOn() && static_cast<int64_t>(e->link) > t) {
-            const uint32_t endUs = e->link;
+        uint32_t endUs = 0;
+        bool sounding = false;
+        if (sliced_) {
+            uint32_t link = sisterPos_[pos];
+            if (linkIsNoteOn(link) &&
+                static_cast<size_t>(linkPartner(link)) > curPos) {
+                const uint32_t offPos = linkPartner(link);
+                endUs = offPos < posUs_.size() ? posUs_[offPos]
+                                               : static_cast<uint32_t>(t);
+                sounding = static_cast<int64_t>(endUs) > t;
+            }
+        } else if (e && e->isNoteOn() && static_cast<int64_t>(e->link) > t) {
+            endUs = e->link;
+            sounding = true;
+        }
+
+        if (sounding && e) {
             uintptr_t page = reinterpret_cast<uintptr_t>(e) & ~(kPageSize - 1);
             uintptr_t page2 = (reinterpret_cast<uintptr_t>(e) + kEventSize - 1)
                               & ~(kPageSize - 1);
