@@ -186,7 +186,8 @@ private:
     int noteState_[128] = {0};
 
     // render scratch — built and consumed inline on the engine thread
-    std::vector<NoteInstance> instances_;
+    std::vector<NoteInstance> whiteInstances_;
+    std::vector<NoteInstance> sharpInstances_;
     std::vector<uint32_t> trackColorsDark_;
     std::vector<uint32_t> trackColorsVeryDark_;
     uint32_t keyColor_[128] = {0};
