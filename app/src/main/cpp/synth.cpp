@@ -248,10 +248,18 @@ void Synth::sendRaw(uint8_t status, uint8_t d1, uint8_t d2) {
     // the instrument change!
     int len = ((status & 0xF0) == 0xC0 || (status & 0xF0) == 0xD0) ? 2 : 3;
 
-    uint64_t t0 = nowUs();
-    BASS_MIDI_StreamEvents(midiStream_, BASS_MIDI_EVENTS_RAW | BASS_MIDI_EVENTS_ASYNC, buf, len);
-    evMicros_.fetch_add(nowUs() - t0, std::memory_order_relaxed);
-    evCalls_.fetch_add(1, std::memory_order_relaxed);
+    // Keep the diagnostic without making it part of every MIDI event's cost.
+    // One call in 1024 is timed; the sample average is scaled to the full count
+    // when the 500 ms perf log asks for it.
+    ++evCalls_;
+    if ((evCalls_ & 1023u) == 1u) {
+        uint64_t t0 = nowUs();
+        BASS_MIDI_StreamEvents(midiStream_, BASS_MIDI_EVENTS_RAW | BASS_MIDI_EVENTS_ASYNC, buf, len);
+        evSampleMicros_ += nowUs() - t0;
+        ++evSamples_;
+    } else {
+        BASS_MIDI_StreamEvents(midiStream_, BASS_MIDI_EVENTS_RAW | BASS_MIDI_EVENTS_ASYNC, buf, len);
+    }
 }
 
 void Synth::noteOn(int channel, int key, int velocity) {
@@ -271,9 +279,15 @@ void Synth::flush() {
 }
 
 void Synth::sampleEventCost(uint64_t& calls, uint64_t& micros, uint64_t& bpMicros) {
-    calls    = evCalls_.exchange(0,  std::memory_order_relaxed);
-    micros   = evMicros_.exchange(0, std::memory_order_relaxed);
+    calls = evCalls_;
+    if (evSamples_ != 0 && calls != 0)
+        micros = (evSampleMicros_ * calls) / evSamples_;
+    else
+        micros = 0;
     bpMicros = 0;
+    evCalls_ = 0;
+    evSampleMicros_ = 0;
+    evSamples_ = 0;
 }
 
 void Synth::shutdown() {

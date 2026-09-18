@@ -447,7 +447,17 @@ bool RendererES2::buildPrograms() {
     skewProg_ = linkProgram(kSkewVS, kSkewFS, skewB, 9);
     textProg_ = linkProgram(kTextVS, kTextFS, textB, 4);
     bgProg_   = linkProgram(kBgVS,   kBgFS,   bgB,   1);
-    return noteProg_ && rectProg_ && gradProg_ && skewProg_ && textProg_ && bgProg_;
+    if (!(noteProg_ && rectProg_ && gradProg_ && skewProg_ && textProg_ && bgProg_))
+        return false;
+
+    noteUClock_    = glGetUniformLocation(noteProg_, "uClockSec");
+    noteUWindow_   = glGetUniformLocation(noteProg_, "uWindowSec");
+    noteUKbFrac_   = glGetUniformLocation(noteProg_, "uKbFrac");
+    noteUViewport_ = glGetUniformLocation(noteProg_, "uViewportPx");
+    noteUWhiteKey_ = glGetUniformLocation(noteProg_, "uWhiteKeyPx");
+    bgUYBottom_    = glGetUniformLocation(bgProg_, "uYBottom");
+    bgUTex_        = glGetUniformLocation(bgProg_, "uTex");
+    return true;
 }
 
 // ---- EGL init ---------------------------------------------------------------
@@ -823,7 +833,7 @@ void RendererES2::renderKeyboard(const uint32_t keyColor[128]) {
 
     // PFA KBPercent = 0.25 → keyboard occupies bottom 25% of screen height.
     // In PFA: fKeysY = m_fNotesY + m_fNotesCY = height of notes area top (in screen pixels, y down).
-    // In aPFA: keyboard is at the bottom. fKeysY_px = top of keyboard in pixel-y-down coords.
+    // In aPFAViz: keyboard is at the bottom. fKeysY_px = top of keyboard in pixel-y-down coords.
     float fKeysCY  = H * kbFrac_;
     float fKeysY   = H - fKeysCY;   // top of keyboard in screen px (y downward)
 
@@ -1152,7 +1162,8 @@ void RendererES2::renderKeyboard(const uint32_t keyColor[128]) {
 
 void RendererES2::render(float clockSec, float totalSec, float fps,
                       float windowSec,
-                      const std::vector<NoteInstance>& notes,
+                      const std::vector<NoteInstance>& whiteNotes,
+                      const std::vector<NoteInstance>& sharpNotes,
                       const uint32_t keyColor[128]) {
     if (!valid()) return;
 
@@ -1212,10 +1223,10 @@ void RendererES2::render(float clockSec, float totalSec, float fps,
         // One quad stretched across the note field (aspect not preserved). The
         // octave-split lines are skipped so the image reads cleanly behind notes.
         glUseProgram(bgProg_);
-        glUniform1f(glGetUniformLocation(bgProg_, "uYBottom"), 2.0f * kbFrac_ - 1.0f);
+        glUniform1f(bgUYBottom_, 2.0f * kbFrac_ - 1.0f);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, bgTex_);
-        glUniform1i(glGetUniformLocation(bgProg_, "uTex"), 0);
+        glUniform1i(bgUTex_, 0);
         // Plain (non-instanced) unit quad — bgProg only reads aQuad (location 0).
         // glDrawArrays on a triangle strip is core ES 2.0, so no instancing needed.
         for (GLuint i = 0; i <= 8; i++) glDisableVertexAttribArray(i);
@@ -1251,31 +1262,24 @@ void RendererES2::render(float clockSec, float totalSec, float fps,
     }
 
     // ---- note field — whites first, then sharps on top (PFA layering) ----
-    if (!notes.empty()) {
+    if (!whiteNotes.empty() || !sharpNotes.empty()) {
         glUseProgram(noteProg_);
-        glUniform1f(glGetUniformLocation(noteProg_, "uClockSec"), clockSec);
-        glUniform1f(glGetUniformLocation(noteProg_, "uWindowSec"),
-                    windowSec > 1e-6f ? windowSec : 1e-6f);
-        glUniform1f(glGetUniformLocation(noteProg_, "uKbFrac"), kbFrac_);
-        glUniform2f(glGetUniformLocation(noteProg_, "uViewportPx"),
-                    (float)width_, (float)height_);
+        glUniform1f(noteUClock_, clockSec);
+        glUniform1f(noteUWindow_, windowSec > 1e-6f ? windowSec : 1e-6f);
+        glUniform1f(noteUKbFrac_, kbFrac_);
+        glUniform2f(noteUViewport_, (float)width_, (float)height_);
         float whiteKeyPx = 0.0f;
         for (int k = startNote_; k <= endNote_; k++) {
             if (!pfaIsSharp(k)) { whiteKeyPx = keyW_[k] * (float)width_; break; }
         }
-        glUniform1f(glGetUniformLocation(noteProg_, "uWhiteKeyPx"), whiteKeyPx);
+        glUniform1f(noteUWhiteKey_, whiteKeyPx);
 
-        // Fill each instance's keyX/keyW from the key layout (replaces the old
-        // dynamically-indexed uKey[] uniform — see kNoteVS). Folds into the
-        // existing white/sharp split copy, so no extra per-note pass.
-        auto fillSplit = [&](uint32_t wantSharp) {
+        auto widen = [&](const std::vector<NoteInstance>& src) {
             notesScratch_.clear();
-            for (const auto& n : notes) {
-                if (n.isSharp != wantSharp) continue;
+            notesScratch_.reserve(src.size());
+            for (const auto& n : src) {
                 int k = (int)(n.key + 0.5f);
                 k = k < 0 ? 0 : (k > 127 ? 127 : k);
-                // Widen the shared 28-byte NoteInstance into the renderer's
-                // 36-byte NoteInstanceES2, filling keyX/keyW from the key layout.
                 NoteInstanceES2 m;
                 m.startSec      = n.startSec;
                 m.durSec        = n.durSec;
@@ -1290,15 +1294,12 @@ void RendererES2::render(float clockSec, float totalSec, float fps,
             }
         };
 
-        // Pass 1: white key notes (uniforms set above persist through drawInstanced,
-        // which re-binds noteProg_).
-        fillSplit(0u);
+        widen(whiteNotes);
         if (!notesScratch_.empty())
             drawInstanced(noteProg_, notesScratch_.data(), (int)notesScratch_.size(),
                           sizeof(NoteInstanceES2), kNoteAttrs, 7, instVbo_);
 
-        // Pass 2: sharp key notes on top
-        fillSplit(1u);
+        widen(sharpNotes);
         if (!notesScratch_.empty())
             drawInstanced(noteProg_, notesScratch_.data(), (int)notesScratch_.size(),
                           sizeof(NoteInstanceES2), kNoteAttrs, 7, instVbo_);

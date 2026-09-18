@@ -65,7 +65,8 @@ public:
 
     void render(float clockSec, float totalSec, float fps,
                 float windowSec,
-                const std::vector<NoteInstance>& notes,
+                const std::vector<NoteInstance>& whiteNotes,
+                const std::vector<NoteInstance>& sharpNotes,
                 const uint32_t keyColor[128]) override;
 
 private:
@@ -123,6 +124,10 @@ private:
     GLuint skewProg_ = 0;
     GLuint textProg_ = 0;
     GLuint bgProg_   = 0;   // stretched background-image quad
+
+    GLint noteUClock_ = -1, noteUWindow_ = -1, noteUKbFrac_ = -1;
+    GLint noteUViewport_ = -1, noteUWhiteKey_ = -1;
+    GLint bgUYBottom_ = -1, bgUTex_ = -1;
 
     // VBOs (one per instanced pipeline + the shared unit quad)
     GLuint instVbo_     = 0;

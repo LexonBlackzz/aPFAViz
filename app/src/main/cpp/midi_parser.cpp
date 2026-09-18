@@ -1,20 +1,14 @@
 // midi_parser.cpp — see midi_parser.h.
 //
-// Each MIDI note message becomes a PlayEvent appended to eventPool in FILE
-// order — the note-on event the instant the note-on is parsed, the note-off
-// event the instant the note-off is parsed — exactly as PFA does (one heap
-// object per message). This is load-bearing: it leaves note-on events in
-// start-time order, the order the dispatch loop and the O(P) UpdateState scan
-// walk them, so the polyphony hot path streams the pool instead of pointer-
-// chasing it. Building the pool in note-COMPLETION order (pairing on the
-// note-off) instead places every note-on by its END time, scattering every
-// note-on access on the polyphony path — that was aPFA's worse-than-PFA
-// polyphony lag.
+// Each MIDI message becomes a compact PlayEvent appended to eventPool in FILE
+// order — note-on when parsed, note-off when parsed. Keeping parse order retains
+// the useful locality of note-on records while the time-sorted events[] table
+// preserves the exact playback/render ordering.
 //
-// Times are stored as TICKS during parsing and converted to microseconds in
-// place; the `sister` field holds the paired event's INDEX until a final pass
-// turns it into a pointer. events[] is the time-sorted pointer table walked at
-// playback (note.h — this layout IS the cache behaviour).
+// Times are stored as TICKS in absMicroSec during parsing and converted to
+// microseconds in place. Note-on/off link fields initially hold partner POOL
+// indices; after sorting they are remapped to partner positions in events[].
+// No runtime sister pointer is stored inside the 16-byte event.
 #include "midi_parser.h"
 
 #include <algorithm>
@@ -62,44 +56,35 @@ struct Reader {
 struct TempoEvent { uint32_t tick; uint32_t usPerQuarter; };
 struct TempoSeg   { uint32_t tick; uint64_t usAtTick; uint32_t usPerQuarter; };
 
-// During parsing `sister` holds the paired event's pool INDEX, not a pointer —
-// a pointer would dangle when push_back reallocates the pool. A final pass
-// (once the pool is frozen) converts every index to a real pointer.
-inline PlayEvent* idxAsSister(uint32_t idx) {
-    return reinterpret_cast<PlayEvent*>(static_cast<uintptr_t>(idx));
-}
-
-// Append a note-on PlayEvent at `tick`; return its pool index. Its sister is
-// filled in when the matching note-off arrives. Mirrors PFA's MIDIChannelEvent
-// field for field (note.h): eventType, eventCode, track, deltaTicks, absTicks,
-// absMicroSec, channelEventType, inputQuality, channel, param1, param2,
-// sister, simultaneous, label. absMicroSec holds a TICK until conversion.
+// During parsing link holds the paired event's POOL INDEX. Once the
+// time-order table is built, a final inverse-map pass converts both sides of
+// every note pair to positions in events[]. No runtime pointer is stored in an
+// event, which is what lets PlayEvent stay 16 bytes on both 32- and 64-bit.
 uint32_t pushNoteOn(std::vector<PlayEvent>& pool, uint32_t tick,
                     int key, int vel, int track, int channel) {
     int      c   = channel & 0x0F;
     uint8_t  k   = static_cast<uint8_t>(key & 0x7F);
     uint32_t idx = static_cast<uint32_t>(pool.size());
     pool.push_back(PlayEvent{
-        0, 0x90 | c, track, 0, static_cast<int32_t>(tick),
-        static_cast<int64_t>(tick), kNoteOn, 0,
-        static_cast<uint8_t>(c), k, static_cast<uint8_t>(vel & 0x7F),
-        nullptr, 0, nullptr });
+        tick, kNoEventLink, static_cast<uint16_t>(track),
+        static_cast<uint8_t>(0x90 | c), k,
+        static_cast<uint8_t>(vel & 0x7F), static_cast<uint8_t>(c),
+        static_cast<uint8_t>(kNoteOn), 0 });
     return idx;
 }
 
-// Append a note-off PlayEvent at `tick` closing the note-on at `onIdx`, and
-// cross-link the pair via `sister` (still as indices — see idxAsSister).
+// Append a note-off PlayEvent at tick closing the note-on at onIdx.
+// Both events hold the partner's pool index until the time-order table exists.
 void pushNoteOff(std::vector<PlayEvent>& pool, uint32_t tick, uint32_t onIdx) {
     int     c     = pool[onIdx].channel;   // read before push_back may realloc
     int     track = pool[onIdx].track;
     uint8_t k     = pool[onIdx].param1;
     uint32_t offIdx = static_cast<uint32_t>(pool.size());
     pool.push_back(PlayEvent{
-        0, 0x80 | c, track, 0, static_cast<int32_t>(tick),
-        static_cast<int64_t>(tick), kNoteOff, 0,
-        static_cast<uint8_t>(c), k, 0,
-        idxAsSister(onIdx), 0, nullptr });
-    pool[onIdx].sister = idxAsSister(offIdx);
+        tick, onIdx, static_cast<uint16_t>(track),
+        static_cast<uint8_t>(0x80 | c), k, 0,
+        static_cast<uint8_t>(c), static_cast<uint8_t>(kNoteOff), 0 });
+    pool[onIdx].link = offIdx;
 }
 
 // Append a singleton PlayEvent (CC, ProgramChange, etc.) at `tick`.
@@ -108,10 +93,9 @@ void pushChannelEvent(std::vector<PlayEvent>& pool, uint32_t tick,
     int c = status & 0x0F;
     int type = status >> 4;
     pool.push_back(PlayEvent{
-        0, status, track, 0, static_cast<int32_t>(tick),
-        static_cast<int64_t>(tick), type, 0,
-        static_cast<uint8_t>(c), p1, p2,
-        nullptr, 0, nullptr });
+        tick, kNoEventLink, static_cast<uint16_t>(track),
+        status, p1, p2, static_cast<uint8_t>(c),
+        static_cast<uint8_t>(type), 0 });
 }
 
 }  // namespace
@@ -269,25 +253,15 @@ MidiData parseMidi(const std::string& path, std::atomic<float>& progress,
         return s.usAtTick + uint64_t(tick - s.tick) * s.usPerQuarter / ticksPerQuarter;
     };
 
-    // ---- link note-on <-> note-off sisters (the pool is now final) ----
-    // `sister` currently holds the paired event's INDEX; convert each to a real
-    // pointer now that no further push_back can move the pool — the same
-    // in-place trick absMicroSec uses for its tick value.
+    // ---- ticks -> microseconds (in place over the compact pool) ----
     progress = 0.60f;
-    for (size_t k = 0; k < out.eventPool.size(); k++) {
-        uintptr_t sib = reinterpret_cast<uintptr_t>(out.eventPool[k].sister);
-        out.eventPool[k].sister = &out.eventPool[sib];
-    }
-
-    // ---- ticks -> microseconds (in place over the pool) ----
-    progress = 0.62f;
     uint64_t totalUs = 0;
     size_t   poolN   = out.eventPool.size();
     for (size_t i = 0; i < poolN; i++) {
         PlayEvent& e = out.eventPool[i];
         uint64_t us = tickToUs(static_cast<uint32_t>(e.absMicroSec));  // held a tick
         if (us > 0xFFFFFFFFull) us = 0xFFFFFFFFull;
-        e.absMicroSec = static_cast<int64_t>(us);
+        e.absMicroSec = static_cast<uint32_t>(us);
         if (us > totalUs) totalUs = us;
         if ((i & 0xFFFFF) == 0)
             progress = 0.62f + 0.12f * float(i) / float(poolN ? poolN : 1);
@@ -311,6 +285,23 @@ MidiData parseMidi(const std::string& path, std::atomic<float>& progress,
                       return a->track < b->track;  // lower track = drawn first = underneath
                   return a->channelEventType > b->channelEventType;  // non-notes first, note-on, note-off last
               });
+
+    // Convert parse-order partner indices to time-order positions. This is the
+    // only temporary 4 B/event table the in-RAM path needs; it is released
+    // immediately after linking.
+    {
+        std::vector<uint32_t> inv(poolN);
+        PlayEvent* const base = out.eventPool.data();
+        for (size_t pos = 0; pos < poolN; pos++) {
+            size_t poolIdx = static_cast<size_t>(out.events[pos] - base);
+            inv[poolIdx] = static_cast<uint32_t>(pos);
+        }
+        for (PlayEvent& e : out.eventPool) {
+            if (!e.isNoteOn() && !e.isNoteOff()) continue;
+            if (e.link >= poolN) { e.link = kNoEventLink; continue; }
+            e.link = inv[e.link];
+        }
+    }
 
     // ---- program change and controller index ----
     progress = 0.90f;

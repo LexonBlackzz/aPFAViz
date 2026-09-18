@@ -11,14 +11,14 @@
 // ---- logging ---------------------------------------------------------------
 #if defined(__ANDROID__)
   #include <android/log.h>
-  #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  "aPFA", __VA_ARGS__)
-  #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "aPFA", __VA_ARGS__)
+  #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  "aPFAViz", __VA_ARGS__)
+  #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "aPFAViz", __VA_ARGS__)
 #else
   #include <cstdio>
-  // All aPFA LOG call sites pass a string-literal format first, so the literal
+  // All aPFAViz LOG call sites pass a string-literal format first, so the literal
   // concatenation below is well-formed. Shows up in the Xcode device console.
-  #define LOGI(...) do { fprintf(stdout, "[aPFA] " __VA_ARGS__); fputc('\n', stdout); } while (0)
-  #define LOGE(...) do { fprintf(stderr, "[aPFA] " __VA_ARGS__); fputc('\n', stderr); } while (0)
+  #define LOGI(...) do { fprintf(stdout, "[aPFAViz] " __VA_ARGS__); fputc('\n', stdout); } while (0)
+  #define LOGE(...) do { fprintf(stderr, "[aPFAViz] " __VA_ARGS__); fputc('\n', stderr); } while (0)
 #endif
 
 // ---- thread policy ---------------------------------------------------------

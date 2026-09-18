@@ -1,11 +1,10 @@
 // streamer.h — file-backed event pool: identical layout, kernel-managed residency.
 //
-// The 72-byte PlayEvent pool is aPFA's memory floor: Tau-class MIDIs (6.28M
-// notes) commit ~1 GB of pool + pointer table, all of it load-bearing for the
-// crash behaviour (note.h). This streamer keeps THE SAME pool — same struct,
-// same parse order, same virtual addresses relative to the pool base, same
-// sister pointers, same time-sorted events[] walk — but backs it with a
-// read-only file mapping instead of anonymous RAM:
+// The event pool is file-backed so giant MIDIs do not require the whole song
+// resident in anonymous RAM. aPFAViz uses the same 16-byte PlayEvent layout in
+// both the in-RAM and streaming paths. The time-sorted events[] walk and event
+// ordering are unchanged; integer partner-position metadata replaces runtime
+// sister pointers.
 //
 //   1. The parse writes the pool to a temp file in PARSE order (track by
 //      track), with absMicroSec already in µs and `sister` holding the real
@@ -97,12 +96,10 @@ namespace apfa {
 // single free run was only 980 MB against a 1564 MB pool. Split across the
 // four largest gaps it fits with room to spare.
 //
-// Splitting is safe because nothing outside the loader ever treats the pool as
-// one flat array: the engine reaches events only through events[] and through
-// `sister`, both of which hold real PlayEvent pointers baked in during pass B.
-// Segment boundaries are multiples of lcm(sizeof(PlayEvent), page size), so no
-// event ever straddles two segments, and the hot path compiles to exactly the
-// same code walking exactly the same addresses.
+// Splitting is safe because the engine reaches events through the time-order
+// events[] table, while note pairing is held separately as compact position
+// metadata. Segment boundaries are multiples of lcm(sizeof(PlayEvent), page
+// size), so no compact event ever straddles two segments.
 // ---- sliced pool (32-bit only; see SLICED-POOL-DESIGN.md) -------------------
 //
 // One slice of the song. Its pool holds, laid out track by track exactly as the
@@ -113,9 +110,9 @@ namespace apfa {
 //   * CARRY-OUT, a copy of the note-off of every body note-on that ends at or
 //     after endPos, so that every note-on's `sister` resolves inside its own
 //     slice.
-// With all three, `events[]` and `sister` are real PlayEvent pointers for the
-// whole time the slice is mapped, which is what keeps dispatch()/buildVisible()
-// untouched and the hot path free.
+// With the body/carry materialised, events[] positions needed by dispatch,
+// active-note scans and the visible window have live PlayEvent pointers for the
+// lifetime of the slice. Note pairing itself remains integer position metadata.
 struct SlicePlan {
     uint32_t firstPos  = 0;   // first body position in the time-sorted walk
     uint32_t endPos    = 0;   // one past the last body position
@@ -167,10 +164,21 @@ inline size_t poolOffIn(const std::vector<PoolSeg>& segs, const void* p) {
 
 class Streamer {
 public:
-    // sisterPos values for non-note events and note-offs. Everything below
-    // kSisNoteOff is a note-on whose value is its note-off's events[] position.
-    static constexpr uint32_t kSisNonNote = 0xFFFFFFFFu;
-    static constexpr uint32_t kSisNoteOff = 0xFFFFFFFEu;
+    // Compact per-position note link table. The top bit marks note-offs;
+    // note-ons store the matching note-off position directly. Non-note events
+    // use 0xFFFFFFFF. This gives both directions in one 4-byte table.
+    static constexpr uint32_t kLinkNonNote = 0xFFFFFFFFu;
+    static constexpr uint32_t kLinkNoteOffFlag = 0x80000000u;
+    static constexpr uint32_t kLinkPosMask = 0x7FFFFFFFu;
+
+    static bool linkIsNonNote(uint32_t v) { return v == kLinkNonNote; }
+    static bool linkIsNoteOff(uint32_t v) {
+        return v != kLinkNonNote && (v & kLinkNoteOffFlag) != 0;
+    }
+    static bool linkIsNoteOn(uint32_t v) {
+        return v != kLinkNonNote && (v & kLinkNoteOffFlag) == 0;
+    }
+    static uint32_t linkPartner(uint32_t v) { return v & kLinkPosMask; }
 
     ~Streamer() { close(); }
 
@@ -220,8 +228,8 @@ public:
     // (Android's FUSE layer hides the real type behind its own magic).
     bool fileTooBig() const { return fileTooBig_; }
     // True when the last open() failed because the pool's virtual address
-    // range could not be reserved. The pool is ONE contiguous VA reservation
-    // (sister pointers are precomputed against its base), so a 32-bit process
+    // range could not be reserved. The full-pool path still prefers large
+    // virtual-address reservations for direct event pointers, so a 32-bit process
     // — a 64-bit SoC running a 32-bit ROM very much included — tops out around
     // 2-3 GB of user address space for everything. Distinct from the other two
     // because falling back to the in-RAM parse cannot help: a MIDI whose pool
@@ -288,11 +296,13 @@ public:
     // BEFORE committing to it — 0 on failure/empty.
     static uint64_t predictEventCount(const std::string& midiPath);
 
-    // For events[] position `pos`: kSisNonNote, kSisNoteOff, or (for a
-    // note-on) the events[] position of its note-off. Lets applySeek rebuild
-    // active_ without dereferencing the pool for every historical event
-    // (which would fault the entire cold file in random order).
+    // Raw compact link metadata for an events[] position. This stays resident
+    // even when the backing event page is cold or, in sliced mode, unmapped.
     uint32_t sisterPosAt(size_t pos) const { return sisterPos_[pos]; }
+    uint32_t partnerPosAt(size_t pos) const {
+        uint32_t v = sisterPos_[pos];
+        return linkIsNonNote(v) ? kLinkNonNote : linkPartner(v);
+    }
 
     // How far ahead of the playhead the engine actually reads: buildVisible's
     // 3.0s * noteSpeed band. The front horizon is this plus kLeadUs, so the
@@ -446,7 +456,7 @@ private:
     std::vector<std::string> tempPaths_;
 
     // ---- resident tables ----
-    std::vector<uint32_t>    sisterPos_;     // per events[] position (see above)
+    std::vector<uint32_t>    sisterPos_;     // compact bidirectional link metadata
     std::vector<TrackRange>  trackRange_;    // pool-index span per track
     std::vector<uint32_t>    trackSampleOff_;// per-track offset into trackSamples_
     std::vector<TrackSample> trackSamples_;  // every kTrackSampleStep events

@@ -82,8 +82,11 @@ private:
     int  sampleRate_ = 48000;
     bool ready_      = false;
 
-    std::atomic<uint64_t> evCalls_{0};
-    std::atomic<uint64_t> evMicros_{0};
+    // Engine-thread-only sparse profiler. Measuring every event used to add
+    // two clock_gettime calls plus atomics to the hottest path in the app.
+    uint64_t evCalls_ = 0;
+    uint64_t evSampleMicros_ = 0;
+    uint64_t evSamples_ = 0;
 };
 
 }  // namespace apfa

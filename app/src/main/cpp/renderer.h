@@ -1,6 +1,6 @@
 // renderer.h — shared renderer interface + per-instance data layouts.
 //
-// aPFA ships two renderer implementations behind the IRenderer interface:
+// aPFAViz ships two renderer implementations behind the IRenderer interface:
 //   • RendererES2 (renderer.cpp / renderer_es2.h) — OpenGL ES 2.0 baseline, GLSL
 //     ES 1.00, runs on ES2-only GPUs (Mali-400 / MT6570 class). This is also the
 //     iOS renderer. The "Legacy Renderer (GLES 2.0)" toggle selects it.
@@ -80,7 +80,8 @@ public:
 
     virtual void render(float clockSec, float totalSec, float fps,
                         float windowSec,
-                        const std::vector<NoteInstance>& notes,
+                        const std::vector<NoteInstance>& whiteNotes,
+                        const std::vector<NoteInstance>& sharpNotes,
                         const uint32_t keyColor[128]) = 0;
 };
 

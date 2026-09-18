@@ -1,4 +1,4 @@
-package com.apfa
+package com.apfaviz
 
 import android.app.Activity
 import android.app.AlertDialog
@@ -59,6 +59,7 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
         const val EXTRA_BG_COLOR = "bgColor"
         const val EXTRA_BG_IMAGE = "bgImage"
         const val EXTRA_LEGACY   = "legacyRenderer"   // ES2 "Legacy Renderer (GLES 2.0)"
+        const val EXTRA_LIQUID_GLASS = "liquidGlass"
         const val EXTRA_STREAM   = "diskStreaming"    // allow the chunked pagefile sort
                                                       // (key name kept for settings compat)
         const val EXTRA_SD_POOL  = "sdPagefile"       // put the pagefile on the SD card
@@ -134,6 +135,7 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
     private var uiHidden     = false
     private var holdFired    = false
     private var lastStatsUpdateMs = 0L
+    private var liquidGlassEnabled = true
 
     private lateinit var transportBar: View
     private lateinit var statsPanel: TextView
@@ -159,6 +161,7 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
         val bgColor    = intent.getIntExtra(EXTRA_BG_COLOR, 0x00464646)
         val bgImage    = intent.getStringExtra(EXTRA_BG_IMAGE)
         val legacy     = intent.getBooleanExtra(EXTRA_LEGACY, false)
+        liquidGlassEnabled = intent.getBooleanExtra(EXTRA_LIQUID_GLASS, true)
         val chunked    = intent.getBooleanExtra(EXTRA_STREAM, false)
         val sdPagefile = intent.getBooleanExtra(EXTRA_SD_POOL, false)
 
@@ -195,7 +198,7 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
                 if (sd != null) {
                     poolDir = sd.absolutePath
                 } else {
-                    Log.w("aPFA", "SD pagefile requested but unavailable: $why")
+                    Log.w("aPFAViz", "SD pagefile requested but unavailable: $why")
                     ui.post {
                         Toast.makeText(this,
                             "Using internal storage for the pagefile — " +
@@ -221,7 +224,7 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
                             .format(nativeGetNoteCount(), mb, streamedMb)
                     else
                         "%,d notes  -  %.1f MB".format(nativeGetNoteCount(), mb)
-                    Log.i("aPFA", infoLine)
+                    Log.i("aPFAViz", infoLine)
                     showReadyScreen(
                         midiName = midiName,
                         midiBytes = midiBytes,
@@ -271,7 +274,7 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
             setPadding(dp(30), dp(28), dp(30), dp(28))
         }
         card.addView(TextView(this).apply {
-            text = "aPFA"
+            text = "aPFAViz"
             setTextColor(Color.WHITE)
             textSize = 31f
             typeface = Typeface.DEFAULT_BOLD
@@ -379,7 +382,7 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
         }
         val titleBlock = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         titleBlock.addView(TextView(this).apply {
-            text = "aPFA"
+            text = "aPFAViz"
             setTextColor(Color.WHITE)
             textSize = 27f
             typeface = Typeface.DEFAULT_BOLD
@@ -644,8 +647,30 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
         strength: Float,
         cornerDp: Int,
         interactive: Boolean
-    ): LiquidGlassView =
-        LiquidGlassView(this).apply {
+    ): View {
+        if (!liquidGlassEnabled) {
+            return FrameLayout(this).apply {
+                val alpha = if (interactive) 255 else 235
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.RECTANGLE
+                    cornerRadius = dp(cornerDp).toFloat()
+                    setColor(Color.argb(
+                        alpha, Color.red(tint), Color.green(tint), Color.blue(tint)
+                    ))
+                    setStroke(
+                        dp(1),
+                        if (interactive) Color.argb(155, 255, 255, 255)
+                        else Color.argb(72, 255, 255, 255)
+                    )
+                }
+                addView(content, FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                ))
+            }
+        }
+
+        return LiquidGlassView(this).apply {
             cornerRadius = dp(cornerDp).toFloat()
             material = GlassMaterial.REGULAR
             blurAmount = 0.13f
@@ -671,6 +696,7 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
                 ViewGroup.LayoutParams.MATCH_PARENT
             ))
         }
+    }
 
     private fun animateGlassIn(view: View, delayMs: Long) {
         view.alpha = 0f
@@ -758,7 +784,7 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
             gravity = Gravity.CENTER_VERTICAL
         }
         brand.addView(TextView(this).apply {
-            text = "aPFA"
+            text = "aPFAViz"
             setTextColor(Color.WHITE)
             textSize = 17f
             typeface = Typeface.DEFAULT_BOLD
@@ -889,7 +915,7 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
                 } else {
                     // Engine aborted during start-up (synth or GL init). Show why
                     // instead of an infinite "Starting…" and stop polling — the
-                    // user can back out. Full driver error is in logcat (tag aPFA).
+                    // user can back out. Full driver error is in logcat (tag aPFAViz).
                     val err = nativeGetStartError()
                     if (err != 0) {
                         loadingOverlay.text = when (err) {
@@ -898,7 +924,7 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
                             2 -> "Graphics failed to initialize.\n\n" +
                                  "If this is an older (OpenGL ES 2.0) device, enable " +
                                  "\"Legacy Renderer (GLES 2.0)\" in Settings and try " +
-                                 "again. See logcat (tag aPFA) for details."
+                                 "again. See logcat (tag aPFAViz) for details."
                             else -> "Playback failed to start."
                         }
                         return
@@ -1109,7 +1135,7 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
             bmp.recycle()
             nativeSetBgImage(pixels, w, h)
         } catch (e: Exception) {
-            Log.e("aPFA", "applyBgImage failed", e)
+            Log.e("aPFAViz", "applyBgImage failed", e)
         }
     }
 
@@ -1139,7 +1165,7 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
 
         val local = resolveLocalPath(uri)
         if (local != null && File(local).canRead()) {
-            Log.i("aPFA", "soundfont: playing in place, $local")
+            Log.i("aPFAViz", "soundfont: playing in place, $local")
             return local
         }
         if (!isSfz) return copyToCache(uriStr, name) ?: ""
@@ -1201,7 +1227,7 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
         val dir = File(cacheDir, "sfz")
         wipe(dir)
         if (!dir.mkdirs() && !dir.isDirectory) {
-            Log.e("aPFA", "sfz: could not create $dir")
+            Log.e("aPFAViz", "sfz: could not create $dir")
             return null
         }
         val localRoot = resolveLocalPath(uri)
@@ -1226,15 +1252,15 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
             if (files >= SFZ_MAX_FILES || bytes >= SFZ_MAX_BYTES) { capped = true; break }
             val out = File(dir, rel)
             if (!withinBundle(dir, out)) {
-                Log.w("aPFA", "sfz: refusing path outside the bundle: $rel")
+                Log.w("aPFAViz", "sfz: refusing path outside the bundle: $rel")
                 continue
             }
             out.parentFile?.mkdirs()
             val n = fetchInto(uri, localRoot, rootName, rel, out)
             if (n < 0) {
-                if (rel == rootName) { Log.e("aPFA", "sfz: cannot read $rel"); return null }
+                if (rel == rootName) { Log.e("aPFAViz", "sfz: cannot read $rel"); return null }
                 missing++
-                Log.w("aPFA", "sfz: could not fetch $rel")
+                Log.w("aPFAViz", "sfz: could not fetch $rel")
                 continue
             }
             files++
@@ -1244,7 +1270,7 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
                 val refs = try {
                     sfzReferences(out.readText())
                 } catch (e: Exception) {
-                    Log.w("aPFA", "sfz: unreadable text in $rel", e)
+                    Log.w("aPFAViz", "sfz: unreadable text in $rel", e)
                     emptyList<String>()
                 }
                 for (r in refs) if (seen.add(r)) queue.add(r)
@@ -1252,11 +1278,11 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
         }
         if (!rootOk) return null
 
-        Log.i("aPFA", "sfz: bundled $files file(s), %.1f MB, $missing missing%s"
+        Log.i("aPFAViz", "sfz: bundled $files file(s), %.1f MB, $missing missing%s"
             .format(bytes / 1048576.0, if (capped) " (capped)" else ""))
         if (missing > 0 || capped) {
             val why = if (capped)
-                "This SFZ is larger than aPFA will copy ($files files)."
+                "This SFZ is larger than aPFAViz will copy ($files files)."
             else
                 "$missing sample file(s) of this SFZ could not be read."
             ui.post {
@@ -1277,7 +1303,7 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
             try {
                 contentResolver.openInputStream(base)?.use { return writeTo(it, out) }
             } catch (e: Exception) {
-                Log.w("aPFA", "sfz: root open failed", e)
+                Log.w("aPFAViz", "sfz: root open failed", e)
             }
         } else {
             // A SAF grant is per-document, but ExternalStorageProvider will
@@ -1298,7 +1324,7 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
                 if (f.canRead()) try {
                     FileInputStream(f).use { return writeTo(it, out) }
                 } catch (e: Exception) {
-                    Log.w("aPFA", "sfz: path read failed for $rel", e)
+                    Log.w("aPFAViz", "sfz: path read failed for $rel", e)
                 }
             }
         }
@@ -1432,7 +1458,7 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
         }
         out.absolutePath
     } catch (e: Exception) {
-        Log.e("aPFA", "copyToCache failed: $name", e)
+        Log.e("aPFAViz", "copyToCache failed: $name", e)
         null
     }
 }

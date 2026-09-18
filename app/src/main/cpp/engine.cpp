@@ -351,10 +351,38 @@ bool Engine::load(const std::string& midiPath, const std::string& soundfontPath,
     for (const PlayEvent* e : midi_.events) {
         if (e->isNoteOn()) { firstNoteUs_ = e->absMicroSec; break; }
     }
+    if (midi_.valid) prepareTrackColorVariants();
 #ifdef APFA_STREAMING
     if (!midi_.valid) clearLoadMarker();   // clean failure, not an OOM death
 #endif
     return midi_.valid;
+}
+
+void Engine::prepareTrackColorVariants() {
+    const std::vector<uint32_t>& src = midi_.trackColors;
+    trackColorsDark_.resize(src.size());
+    trackColorsVeryDark_.resize(src.size());
+
+    for (size_t i = 0; i < src.size(); i++) {
+        uint32_t primary = src[i];
+        float r = ((primary >>  0) & 0xFF) / 255.0f;
+        float g = ((primary >>  8) & 0xFF) / 255.0f;
+        float b = ((primary >> 16) & 0xFF) / 255.0f;
+        float vmax = r > g ? (r > b ? r : b) : (g > b ? g : b);
+        float vmin = r < g ? (r < b ? r : b) : (g < b ? g : b);
+        float v = vmax;
+        float sat = vmax > 0.0f ? (vmax - vmin) / vmax : 0.0f;
+        float h = 0.0f;
+        if (vmax != vmin) {
+            float d = vmax - vmin;
+            if      (vmax == r) h = (g - b) / d + (g < b ? 6.0f : 0.0f);
+            else if (vmax == g) h = (b - r) / d + 2.0f;
+            else                h = (r - g) / d + 4.0f;
+            h /= 6.0f;
+        }
+        trackColorsDark_[i]     = packHSV(h, sat, v * 0.6f);
+        trackColorsVeryDark_[i] = packHSV(h, sat, v * 0.2f);
+    }
 }
 
 void Engine::start(void* surface) {
@@ -584,7 +612,7 @@ void Engine::threadMain() {
             renderer_->setBgColor(bgColor_.load());
             syncBgImage();
             renderer_->render(clockUs_ * 1e-6f, midi_.totalUs * 1e-6f, pubFps_.load(),
-                             3.0f * noteSpeed_, instances_, keyColor_);
+                             3.0f * noteSpeed_, whiteInstances_, sharpInstances_, keyColor_);
             usleep(10000);   // 10 ms idle — matches PFA's paused Sleep(10)
             lastWall_ = nowUs();
             continue;
@@ -631,9 +659,16 @@ void Engine::frame() {
     syncBgImage();
     renderer_->render(clockUs_ * 1e-6f, midi_.totalUs * 1e-6f,
                      pubFps_.load(),
-                     3.0f * noteSpeed_, instances_, keyColor_);
+                     3.0f * noteSpeed_, whiteInstances_, sharpInstances_, keyColor_);
     // eglSwapBuffers is called inside renderer_->render(); it stalls here until
     // vblank. That stall is part of lastWall_ -> now on the next frame.
+    uint64_t tPresented = nowUs();
+    uint64_t rUs = tPresented - tEnd;
+    sumRenderUs_ += rUs;
+    if (rUs > maxRenderUs_) maxRenderUs_ = rUs;
+    size_t visibleNow = whiteInstances_.size() + sharpInstances_.size();
+    visibleSum_ += visibleNow;
+    if (visibleNow > visibleMax_) visibleMax_ = visibleNow;
 
     // --- metrics ---
     pubTimeUs_.store(static_cast<int64_t>(clockUs_));
@@ -675,9 +710,13 @@ void Engine::frame() {
         if (gFloor < voiceCount_)
             LOGI("guard: voices %d now, %d low this window (ceiling %d)",
                  gVoices, gFloor, voiceCount_);
-        LOGI("frame: dispatch %.1f/%.1f | build %.1f/%.1f ms avg/max",
+        LOGI("frame: dispatch %.1f/%.1f | build %.1f/%.1f | render %.1f/%.1f ms avg/max",
              sumDispatchUs_ * inv / 1000.0, maxDispatchUs_ / 1000.0,
-             sumBuildUs_    * inv / 1000.0, maxBuildUs_    / 1000.0);
+             sumBuildUs_    * inv / 1000.0, maxBuildUs_    / 1000.0,
+             sumRenderUs_   * inv / 1000.0, maxRenderUs_   / 1000.0);
+        LOGI("visible: %llu avg | %zu max",
+             static_cast<unsigned long long>(frames > 0 ? visibleSum_ / frames : 0),
+             visibleMax_);
         // Twin of PFA's PerfLog "state:" line — same columns, same order.
         LOGI("state: poly %llu avg %llu max | %.0f ev/s",
              static_cast<unsigned long long>(frames > 0 ? polySum_ / frames : 0),
@@ -706,8 +745,10 @@ void Engine::frame() {
                  streamer_.windowBytes() / 1048576.0,
                  streamer_.memAvailBytes() / 1048576.0);
 #endif
-        sumDispatchUs_ = sumBuildUs_ = 0;
-        maxDispatchUs_ = maxBuildUs_ = 0;
+        sumDispatchUs_ = sumBuildUs_ = sumRenderUs_ = 0;
+        maxDispatchUs_ = maxBuildUs_ = maxRenderUs_ = 0;
+        visibleSum_ = 0;
+        visibleMax_ = 0;
         polySum_ = polyMax_ = dispEvents_ = 0;
         noteOnsWindow_ = 0;
     }
@@ -742,11 +783,11 @@ void Engine::dispatch() {
             } else {
                 synth_.noteOff(ch, key);
                 noteState_[key] = -1;
-                const PlayEvent* sister = e->sister;
+                const uint32_t onPos = partnerPosAt(eventCursor_);
                 size_t i = 0;
                 while (i < active_.size()) {
                     PlayEvent* a = ev[active_[i]];
-                    if (a == sister) {
+                    if (static_cast<uint32_t>(active_[i]) == onPos) {
                         active_.erase(active_.begin() + static_cast<long>(i));
                     } else {
                         if (a->param1 == key) noteState_[key] = active_[i];
@@ -793,29 +834,11 @@ void Engine::buildVisible() {
     while (windowCursor_ < visEnd && ev[windowCursor_]->absMicroSec < windowEnd)
         windowCursor_++;
 
-    // Derive PFA's three colour levels from the primary packed colour.
-    // SetColor(color, dDark=0.6, dVeryDark=0.2) in PFA — same HSV, scaled V.
-    auto deriveColors = [](uint32_t primary, uint32_t& dark, uint32_t& veryDark) {
-        float r = ((primary >>  0) & 0xFF) / 255.0f;
-        float g = ((primary >>  8) & 0xFF) / 255.0f;
-        float b = ((primary >> 16) & 0xFF) / 255.0f;
-        float vmax = r > g ? (r > b ? r : b) : (g > b ? g : b);
-        float vmin = r < g ? (r < b ? r : b) : (g < b ? g : b);
-        float v = vmax, s = (vmax > 0.0f ? (vmax - vmin) / vmax : 0.0f);
-        float h = 0.0f;
-        if (vmax != vmin) {
-            float d = vmax - vmin;
-            if      (vmax == r) h = (g - b) / d + (g < b ? 6.0f : 0.0f);
-            else if (vmax == g) h = (b - r) / d + 2.0f;
-            else                h = (r - g) / d + 4.0f;
-            h /= 6.0f;
-        }
-        dark     = packHSV(h, s, v * 0.6f);
-        veryDark = packHSV(h, s, v * 0.2f);
+    auto colorIndexOf = [&](const PlayEvent& e) -> size_t {
+        return static_cast<size_t>(e.track) * 16 + e.channel;
     };
-
     auto colorOf = [&](const PlayEvent& e) -> uint32_t {
-        size_t idx = static_cast<size_t>(e.track) * 16 + e.channel;
+        size_t idx = colorIndexOf(e);
         return idx < colors.size() ? colors[idx] : 0xFFFFFFFFu;
     };
 
@@ -825,29 +848,43 @@ void Engine::buildVisible() {
         return pc==1||pc==3||pc==6||pc==8||pc==10;
     };
 
-    auto toInstance = [&](const PlayEvent& e) -> NoteInstance {
+    auto toInstance = [&](size_t pos) -> NoteInstance {
+        const PlayEvent& e = *ev[pos];
         NoteInstance ni;
         ni.startSec = e.absMicroSec * 1e-6f;
-        int64_t endUs = e.sister ? e.sister->absMicroSec : e.absMicroSec;
-        ni.durSec = static_cast<float>(endUs - e.absMicroSec) * 1e-6f;
+        uint32_t partner = partnerPosAt(pos);
+        int64_t endUs = (partner != kNoEventLink) ? eventUsAt(partner)
+                                                  : static_cast<int64_t>(e.absMicroSec);
+        ni.durSec = static_cast<float>(endUs - static_cast<int64_t>(e.absMicroSec)) * 1e-6f;
         ni.key    = static_cast<float>(e.param1);
-        ni.colorPrimary = colorOf(e);
-        deriveColors(ni.colorPrimary, ni.colorDark, ni.colorVeryDark);
+        size_t colorIdx = colorIndexOf(e);
+        ni.colorPrimary = colorIdx < colors.size() ? colors[colorIdx] : 0xFFFFFFFFu;
+        ni.colorDark = colorIdx < trackColorsDark_.size()
+            ? trackColorsDark_[colorIdx] : ni.colorPrimary;
+        ni.colorVeryDark = colorIdx < trackColorsVeryDark_.size()
+            ? trackColorsVeryDark_[colorIdx] : ni.colorPrimary;
         ni.isSharp = isSharpKey(e.param1) ? 1u : 0u;
         return ni;
     };
 
-    instances_.clear();
+    whiteInstances_.clear();
+    sharpInstances_.clear();
     memset(keyColor_, 0, sizeof(keyColor_));
 
+    auto appendInstance = [&](size_t pos) {
+        NoteInstance ni = toInstance(pos);
+        if (ni.isSharp) sharpInstances_.push_back(ni);
+        else            whiteInstances_.push_back(ni);
+    };
+
     for (int idx : active_)
-        instances_.push_back(toInstance(*ev[idx]));
+        appendInstance(static_cast<size_t>(idx));
     for (int k = 0; k < 128; k++)
         if (noteState_[k] >= 0)
             keyColor_[k] = colorOf(*ev[noteState_[k]]);
     for (size_t j = eventCursor_; j < windowCursor_; j++) {
         const PlayEvent* e = ev[j];
-        if (e->isNoteOn()) instances_.push_back(toInstance(*e));
+        if (e->isNoteOn()) appendInstance(j);
     }
 }
 
@@ -917,7 +954,8 @@ void Engine::applySeek(int64_t target) {
         // and "off time > target" are the same predicate.
         for (size_t j = 0; j < eventCursor_; j++) {
             uint32_t s = streamer_.sisterPosAt(j);
-            if (s < Streamer::kSisNoteOff && static_cast<size_t>(s) >= eventCursor_)
+            if (Streamer::linkIsNoteOn(s) &&
+                static_cast<size_t>(Streamer::linkPartner(s)) >= eventCursor_)
                 active_.push_back(static_cast<int>(j));
         }
         // Warm what the next frame reads (visible band, the active notes and
@@ -931,10 +969,12 @@ void Engine::applySeek(int64_t target) {
 #endif
     for (size_t j = 0; j < eventCursor_; j++) {
         const PlayEvent* e = ev[j];
-        if (e->isNoteOn() && e->sister &&
-            static_cast<int64_t>(e->sister->absMicroSec) > target) {
-            active_.push_back(static_cast<int>(j));
-            noteState_[e->param1] = static_cast<int>(j);
+        if (e->isNoteOn()) {
+            uint32_t offPos = partnerPosAt(j);
+            if (offPos != kNoEventLink && eventUsAt(offPos) > target) {
+                active_.push_back(static_cast<int>(j));
+                noteState_[e->param1] = static_cast<int>(j);
+            }
         }
     }
 
@@ -956,6 +996,14 @@ int64_t Engine::eventUsAt(size_t pos) const {
     if (streamer_.isSliced()) return streamer_.usAt(pos);
 #endif
     return midi_.events[pos]->absMicroSec;
+}
+
+uint32_t Engine::partnerPosAt(size_t pos) const {
+#ifdef APFA_STREAMING
+    if (streamer_.isOpen()) return streamer_.partnerPosAt(pos);
+#endif
+    if (pos >= midi_.events.size()) return kNoEventLink;
+    return midi_.events[pos]->link;
 }
 
 void Engine::advancePcCursor() {
