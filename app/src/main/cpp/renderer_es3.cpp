@@ -10,8 +10,8 @@
 #include <android/log.h>
 #include <android/native_window.h>
 
-#define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  "aPFA", __VA_ARGS__)
-#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "aPFA", __VA_ARGS__)
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  "aPFAViz", __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "aPFAViz", __VA_ARGS__)
 
 namespace apfa {
 
@@ -27,17 +27,12 @@ layout(location=1) in float aStartSec;
 layout(location=2) in float aDurSec;
 layout(location=3) in float aKey;
 layout(location=4) in vec4 aColorPrimary;
-layout(location=5) in vec4 aColorDark;
-layout(location=6) in vec4 aColorVeryDark;
-layout(location=7) in float aIsSharp;
 uniform float uClockSec;
 uniform float uWindowSec;
 uniform float uKbFrac;
 uniform vec2  uViewportPx;
 uniform vec2  uKey[128];
 out vec4 vColorPrimary;
-out vec4 vColorDark;
-out vec4 vColorVeryDark;
 out vec2 vUV;
 out vec2 vSizePx;
 void main() {
@@ -51,9 +46,7 @@ void main() {
     float x = kx.x + aQuad.x * kx.y;
     float y = mix(yStart, yEnd, aQuad.y);
     vUV = aQuad;
-    vColorPrimary  = aColorPrimary;
-    vColorDark     = aColorDark;
-    vColorVeryDark = aColorVeryDark;
+    vColorPrimary = aColorPrimary;
     vSizePx = vec2(kx.y * uViewportPx.x, abs(yEnd - yStart) * uViewportPx.y);
     gl_Position = vec4(x * 2.0 - 1.0, y * 2.0 - 1.0, 0.0, 1.0);
 }
@@ -62,8 +55,6 @@ void main() {
 static const char* kNoteFS = R"(#version 300 es
 precision mediump float;
 in vec4 vColorPrimary;
-in vec4 vColorDark;
-in vec4 vColorVeryDark;
 in vec2 vUV;
 in vec2 vSizePx;
 uniform float uWhiteKeyPx;
@@ -74,11 +65,11 @@ void main() {
     bool border = px.x < b || px.y < b ||
                   (vSizePx.x - px.x) < b || (vSizePx.y - px.y) < b;
     if (border) {
-        frag = vec4(vColorVeryDark.rgb, 1.0);
+        frag = vec4(vColorPrimary.rgb * 0.2, 1.0);
     } else {
         vec2 inner = (px - vec2(b)) / (vSizePx - vec2(b * 2.0));
         float t = inner.x;
-        vec3 c = mix(vColorPrimary.rgb, vColorDark.rgb, t);
+        vec3 c = mix(vColorPrimary.rgb, vColorPrimary.rgb * 0.6, t);
         frag = vec4(c, 1.0);
     }
 }
@@ -513,13 +504,10 @@ bool RendererES3::initEGL(void* window) {
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 8, (void*)0);
     pVertexAttribDivisor_(0, 0);
     glBindBuffer(GL_ARRAY_BUFFER, instVbo_);
-    glEnableVertexAttribArray(1); glVertexAttribPointer(1,1,GL_FLOAT,GL_FALSE,28,(void*)0);  pVertexAttribDivisor_(1,1);
-    glEnableVertexAttribArray(2); glVertexAttribPointer(2,1,GL_FLOAT,GL_FALSE,28,(void*)4);  pVertexAttribDivisor_(2,1);
-    glEnableVertexAttribArray(3); glVertexAttribPointer(3,1,GL_FLOAT,GL_FALSE,28,(void*)8);  pVertexAttribDivisor_(3,1);
-    glEnableVertexAttribArray(4); glVertexAttribPointer(4,4,GL_UNSIGNED_BYTE,GL_TRUE, 28,(void*)12); pVertexAttribDivisor_(4,1);
-    glEnableVertexAttribArray(5); glVertexAttribPointer(5,4,GL_UNSIGNED_BYTE,GL_TRUE, 28,(void*)16); pVertexAttribDivisor_(5,1);
-    glEnableVertexAttribArray(6); glVertexAttribPointer(6,4,GL_UNSIGNED_BYTE,GL_TRUE, 28,(void*)20); pVertexAttribDivisor_(6,1);
-    glEnableVertexAttribArray(7); glVertexAttribPointer(7,1,GL_FLOAT,GL_FALSE,28,(void*)24);         pVertexAttribDivisor_(7,1);
+    glEnableVertexAttribArray(1); glVertexAttribPointer(1,1,GL_FLOAT,GL_FALSE,16,(void*)0);  pVertexAttribDivisor_(1,1);
+    glEnableVertexAttribArray(2); glVertexAttribPointer(2,1,GL_FLOAT,GL_FALSE,16,(void*)4);  pVertexAttribDivisor_(2,1);
+    glEnableVertexAttribArray(3); glVertexAttribPointer(3,1,GL_FLOAT,GL_FALSE,16,(void*)8);  pVertexAttribDivisor_(3,1);
+    glEnableVertexAttribArray(4); glVertexAttribPointer(4,4,GL_UNSIGNED_BYTE,GL_TRUE,16,(void*)12); pVertexAttribDivisor_(4,1);
 
     // --- rect VAO --- stride=20 bytes (x,y,w,h,color)
     pGenVertexArrays_(1, &rectVao_);
