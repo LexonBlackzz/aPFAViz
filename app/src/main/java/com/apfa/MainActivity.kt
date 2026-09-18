@@ -491,7 +491,7 @@ class MainActivity : Activity() {
 
     private fun showSpeedInput() {
         val input = EditText(this).apply {
-            inputType = InputType.TYPE_CLASS_DECIMAL or InputType.TYPE_CLASS_NUMBER
+            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
             setText("%.3f".format(noteSpeed))
             setSelectAllOnFocus(true)
         }
@@ -1234,7 +1234,7 @@ class MainActivity : Activity() {
                 }
                 persist(uri)
                 soundfontUri = uri
-                soundfontButton.text = sfButtonLabel(uri)
+                soundfontButton.text = displayName(uri)
                 saveSettings()        // remember it across launches
             }
             REQ_BG_IMAGE -> {
