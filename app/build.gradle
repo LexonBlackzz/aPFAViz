@@ -16,7 +16,7 @@ android {
     namespace 'com.apfa'
     compileSdk 34
     // Keep the proven native toolchain for now. The app itself now targets
-    // Android 6.0+ so the UI can use the modern platform APIs without carrying
+    // Android 7.0+ so the UI can use the modern platform APIs without carrying
     // Gingerbread/pre-SAF compatibility code.
     ndkVersion '21.4.7075529'
 
