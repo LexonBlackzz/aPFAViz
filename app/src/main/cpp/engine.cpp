@@ -176,7 +176,8 @@ bool Engine::load(const std::string& midiPath, const std::string& soundfontPath,
     // sorting for smaller streaming loads.
     markerPath_ = loadMarkerPath(midiPath);
     uint64_t fp = midiFingerprint(midiPath);
-    uint64_t events = Streamer::predictEventCount(midiPath);
+    MidiPreScan preScan = scanMidi(midiPath, loadProgress_);
+    uint64_t events = preScan.valid ? preScan.eventCount : 0;
     uint64_t totalRam =
         static_cast<uint64_t>(sysconf(_SC_PHYS_PAGES)) *
         static_cast<uint64_t>(sysconf(_SC_PAGESIZE));
@@ -305,7 +306,8 @@ bool Engine::load(const std::string& midiPath, const std::string& soundfontPath,
                     return false;
                 }
                 LOGI("streamer unavailable — falling back to in-RAM parse");
-                midi_ = parseMidi(midiPath, loadProgress_, events);
+                midi_ = parseMidi(midiPath, loadProgress_, events,
+                                  preScan.valid ? &preScan : nullptr);
             }
         }
     } else {
@@ -319,7 +321,8 @@ bool Engine::load(const std::string& midiPath, const std::string& soundfontPath,
         // one — and because a clean refusal clears the crash marker on
         // teardown, every retry repeated the same failure instead of escalating.
         try {
-            midi_ = parseMidi(midiPath, loadProgress_, events);  // may die: marker persists
+            midi_ = parseMidi(midiPath, loadProgress_, events,
+                                  preScan.valid ? &preScan : nullptr);  // may die: marker persists
         } catch (const std::bad_alloc&) {
             LOGI("in-RAM parse ran out of memory — handing the load to the "
                  "streaming pool");
