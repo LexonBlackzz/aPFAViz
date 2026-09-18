@@ -323,13 +323,23 @@ struct SkimSink {
 // was emitted; its sister pointer is patched into the file by pass C.
 struct Fixup { uint32_t onIdx, endUs; };
 struct Pair  { uint32_t onIdx, offIdx; };
-struct SortKey { uint64_t key; uint32_t idx; };
 
-// (µs, track, chType) packed key; idx tie-break = parse order. ONE comparator
-// shared by the chunked run sort and the un-chunked whole-table sort so the
-// total event order can never diverge between the two modes.
+// 12-byte time-order record. The previous uint64 packed key + uint32 index
+// padded to 16 bytes, costing 64 MB unnecessarily at 16M events.
+struct SortKey {
+    uint32_t timeUs;
+    uint32_t idx;
+    uint16_t track;
+    uint8_t  typeRank;   // 14 - channelEventType; lower rank sorts first
+    uint8_t  reserved;
+};
+static_assert(sizeof(SortKey) == 12, "SortKey must stay 12 bytes");
+
+// Same total order as the player: time, track, event-type rank, parse order.
 inline bool sortKeyLess(const SortKey& a, const SortKey& b) {
-    if (a.key != b.key) return a.key < b.key;
+    if (a.timeUs != b.timeUs) return a.timeUs < b.timeUs;
+    if (a.track != b.track) return a.track < b.track;
+    if (a.typeRank != b.typeRank) return a.typeRank < b.typeRank;
     return a.idx < b.idx;
 }
 
@@ -486,7 +496,7 @@ struct EmitSink {
     }
 
     // Sort keys. chunked=false (the automatic path): runBuf holds EVERY key
-    // until pass D — 16 B/event resident, the load transient that caps
+    // until pass D — 12 B/event resident, the load transient that caps
     // un-chunked streaming at ~80 M notes on an 8 GB phone (it's what lmkd
     // killed at 78% on NoK 90M). chunked=true ("Chunked Disk Streaming"):
     // keys spill to disk in pre-sorted 32 MB runs and a k-way merge in pass D
@@ -571,9 +581,13 @@ struct EmitSink {
         out.absMicroSec = static_cast<uint32_t>(us);
         buf.push_back(out);
         if (buf.size() >= kBufEvents) flush();
-        runBuf.push_back({ (us << 19) |
-                           (static_cast<uint64_t>(track) << 3) |
-                           static_cast<uint64_t>(14 - chType), idx });
+        runBuf.push_back({
+            static_cast<uint32_t>(us),
+            idx,
+            static_cast<uint16_t>(track),
+            static_cast<uint8_t>(14 - chType),
+            0
+        });
         if (chunked && runBuf.size() >= kRunEntries) spillRun();
         if (inTrackCount % trackSampleStep == 0) {
             sampleUs.push_back(static_cast<int64_t>(us));
@@ -980,7 +994,7 @@ bool Streamer::open(const std::string& midiPath, MidiData& out,
     //   inv[]       totalEvents * 4                   through pass D
     //   poolIdx_    totalEvents * 4    sliced only    held all session
     //   posUs_      totalEvents * 4    sliced only    held all session
-    //   the sort    emit.runBuf, 16 B/event in ONE block when un-chunked;
+    //   the sort    emit.runBuf, 12 B/event in ONE block when un-chunked;
     //               kMergeBudget spread over per-run buffers when chunked
     //
     // Pricing that as a single splittable reservation is what let a load pass
@@ -1216,7 +1230,7 @@ bool Streamer::open(const std::string& midiPath, MidiData& out,
     };
     // Give a named temp's space back the moment its fd closes, instead of at
     // close(). The unlinked path gets this from the kernel for free; without it
-    // the spills — 16 B/event of keys plus 8 B/note of pairs, GBs on the MIDIs
+    // the spills — 12 B/event of keys plus 8 B/note of pairs, GBs on the MIDIs
     // that need the card in the first place — would sit on the card for the
     // whole of playback with nothing holding them open.
     poolDirUsed_   = dir;          // the slice builder creates its temps here
@@ -1408,16 +1422,16 @@ bool Streamer::open(const std::string& midiPath, MidiData& out,
     auto placeEvent = [&](size_t pos, const SortKey& sk) {
         if (sliced) {
             poolIdx_[pos] = sk.idx;
-            posUs_[pos]   = static_cast<uint32_t>(sk.key >> 19);
+            posUs_[pos]   = sk.timeUs;
         } else {
             out.events[pos] = reinterpret_cast<PlayEvent*>(
                 poolAddr(static_cast<size_t>(sk.idx) * kEventSize));
         }
-        int chType = 14 - static_cast<int>(sk.key & 7);
+        int chType = 14 - static_cast<int>(sk.typeRank);
         if (chType == kProgramChange || chType == kController || chType == kPitchBend)
             out.programChangeIdx.push_back(pos);
         if (pos % kPosSampleStep == 0)
-            posTimes_.push_back(static_cast<int64_t>(sk.key >> 19));
+            posTimes_.push_back(static_cast<int64_t>(sk.timeUs));
         if ((pos & 0xFFFFF) == 0)
             progress.store(0.62f + 0.18f * float(pos) / float(totalEvents));
     };
@@ -1456,7 +1470,12 @@ bool Streamer::open(const std::string& midiPath, MidiData& out,
 
         using HeapItem = std::pair<SortKey, uint32_t>;   // (key, run index)
         auto heapGreater = [](const HeapItem& a, const HeapItem& b) {
-            if (a.first.key != b.first.key) return a.first.key > b.first.key;
+            if (a.first.timeUs != b.first.timeUs)
+                return a.first.timeUs > b.first.timeUs;
+            if (a.first.track != b.first.track)
+                return a.first.track > b.first.track;
+            if (a.first.typeRank != b.first.typeRank)
+                return a.first.typeRank > b.first.typeRank;
             return a.first.idx > b.first.idx;
         };
         std::priority_queue<HeapItem, std::vector<HeapItem>, decltype(heapGreater)>
