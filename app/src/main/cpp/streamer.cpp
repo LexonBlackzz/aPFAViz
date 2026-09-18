@@ -467,7 +467,7 @@ struct EmitSink {
     bool     encodeIdx = false;  // sliced-mode switch for resident seek payloads
 
     // outputs
-    std::vector<Fixup>   fixups;         // cross-buffer sister patches (RAM; rare)
+    std::vector<Fixup>   fixups;         // cross-buffer end-time patches (RAM; rare)
     std::vector<PcRaw>   pcRaw;          // sliced loads only (see PcRaw)
     std::vector<int64_t>  sampleUs;      // flattened per-track (µs, poolIdx) samples
     std::vector<uint32_t> sampleIdx;
@@ -2457,28 +2457,10 @@ void Streamer::loaderTickLocked(int64_t t) {
     // U11's average, 3.17 GB at its collapse).
     const int64_t frontUs = budgetedFrontUs(t);
 
-    // Front-edge scan: pre-touch the note-offs of long notes entering the
-    // window, so buildVisible's duration lookup does not fault the partner page
-    // on the engine thread. These stay SYNCHRONOUS — one scattered page
-    // each, and blocking here is how the loader paces itself against storage
-    // instead of racing ahead of it.
-    //
-    // A shorter horizon puts more note-offs past the front edge, so the count
-    // is capped: past the cap the remaining sisters are left to fault on the
-    // engine thread, which is what PFA does with all of them. Better to spend
-    // a bounded slice of the tick here than to let one dense stretch of long
-    // notes starve the bulk advisories below.
+    // buildVisible no longer dereferences paired note-offs: each note-on now
+    // carries its absolute end time directly. Advance the logical front without
+    // the old scattered note-off page-touch scan.
     size_t newFront = std::min(coarsePosOf(t + frontUs) + kPosSampleStep, n);
-    size_t sisterLeft = kMaxSisterTouchPerTick;
-    for (size_t pos = frontPos_; pos < newFront; pos++) {
-        uint32_t s = sisterPos_[pos];
-        if (linkIsNoteOn(s) && static_cast<size_t>(linkPartner(s)) > newFront) {
-            if (sisterLeft == 0) continue;
-            sisterLeft--;
-            const uint8_t* off = reinterpret_cast<const uint8_t*>(ev[linkPartner(s)]);
-            touchRange(off, off + kEventSize - 1);
-        }
-    }
     if (newFront > frontPos_) frontPos_ = newFront;
 
     // Back-edge scan: note-ons leaving the window that are STILL sounding
@@ -2595,33 +2577,15 @@ void Streamer::warmSeek(int64_t targetUs, int64_t visibleEndUs,
         trackHi_[trk] = std::max(trackHi_[trk], ranges[trk].second + 1);
     }
 
-    // Long-note offs inside the visible band (buildVisible reads their times
-    // on the very next frame).
-    size_t p0 = coarsePosOf(targetUs);
-    size_t p1 = std::min(coarsePosOf(visibleEndUs) + kPosSampleStep, totalEvents_);
-    if (sliced_) {
-        if (p0 < cur_.firstPos) p0 = cur_.firstPos;
-        if (p1 > cur_.matEnd)   p1 = cur_.matEnd;
-        if (p0 > p1)            p0 = p1;
-    }
-    for (size_t pos = p0; pos < p1; pos++) {
-        uint32_t s = sisterPos_[pos];
-        if (linkIsNoteOn(s) && static_cast<size_t>(linkPartner(s)) > p1) {
-            const uint8_t* off = reinterpret_cast<const uint8_t*>(ev[linkPartner(s)]);
-            touchRange(off, off + kEventSize - 1);
-        }
-    }
-
-    // Still-sounding note-ons resurrected by the seek: touch them (applySeek
-    // reads param1 right after this) and their offs, and pin their pages.
+    // Still-sounding note-ons resurrected by the seek: touch the note-on page
+    // (applySeek reads param1 immediately) and pin it until its note-off position.
+    // The note-off page itself is no longer read by the render hot path.
     for (int posInt : activePositions) {
         size_t pos = static_cast<size_t>(posInt);
         const uint8_t* on = reinterpret_cast<const uint8_t*>(ev[pos]);
         touchRange(on, on + kEventSize - 1);
         uint32_t s = sisterPos_[pos];
         if (linkIsNoteOn(s)) {
-            const uint8_t* off = reinterpret_cast<const uint8_t*>(ev[linkPartner(s)]);
-            touchRange(off, off + kEventSize - 1);
             uintptr_t page = reinterpret_cast<uintptr_t>(on) & ~(kPageSize - 1);
             uintptr_t page2 = (reinterpret_cast<uintptr_t>(on) + kEventSize - 1)
                               & ~(kPageSize - 1);
