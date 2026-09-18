@@ -123,6 +123,10 @@ class MainActivity : Activity() {
 
     private data class RecentMidi(val uri: Uri, val name: String)
 
+    // LiquidGlass panels are invalidated only while the launcher scrolls.
+    // This avoids an always-on redraw loop on API 24-32's CPU fallback.
+    private val shellGlassPanels = ArrayList<LiquidGlassView>()
+
     // Shell-only palette. None of this touches native rendering or PFA timing.
     private val uiBg       = Color.rgb(9, 11, 18)
     private val uiPanel    = Color.argb(224, 18, 21, 32)
@@ -154,7 +158,7 @@ class MainActivity : Activity() {
     // Old devices (and some OEM pickers, e.g. Huawei EMUI) return file:// URIs from
     // the document picker. Opening those reads the raw /storage path, which needs
     // READ_EXTERNAL_STORAGE. Modern phones (API 33+) always get content:// — no
-    // permission needed, and the permission no longer exists — so we only ask on 23..32.
+    // permission needed, and the permission no longer exists — so we only ask on 24..32.
     private fun ensureStoragePermission() {
         if (Build.VERSION.SDK_INT <= 32) {
             val perm = Manifest.permission.READ_EXTERNAL_STORAGE
@@ -165,6 +169,7 @@ class MainActivity : Activity() {
     }
 
     private fun buildSetupScreen(): View {
+        shellGlassPanels.clear()
         val mp = ViewGroup.LayoutParams.MATCH_PARENT
         val wc = ViewGroup.LayoutParams.WRAP_CONTENT
         val portrait = resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT
@@ -298,7 +303,6 @@ class MainActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(14), dp(8), dp(10), dp(8))
-            background = shellCardBackground(accented = false)
             setOnClickListener { pickFile(REQ_SOUNDFONT) }
         }
         sfRow.addView(TextView(this).apply {
@@ -336,7 +340,6 @@ class MainActivity : Activity() {
         val quick = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(16), dp(16), dp(16))
-            background = shellCardBackground(accented = false)
         }
 
         addVoiceControl(quick)
@@ -382,6 +385,9 @@ class MainActivity : Activity() {
 
         scroll.addView(page, FrameLayout.LayoutParams(mp, wc))
         root.addView(scroll, FrameLayout.LayoutParams(mp, mp))
+        scroll.viewTreeObserver.addOnScrollChangedListener {
+            shellGlassPanels.forEach { it.invalidate() }
+        }
         return root
     }
 
@@ -404,10 +410,9 @@ class MainActivity : Activity() {
             enableAdaptiveTint = false
             enablePressEffect = false
             collectFrameStats = false
-            // These panels sit inside a ScrollView, so their position over the
-            // wallpaper changes while scrolling. Dynamic capture keeps the lens
-            // aligned with that backdrop; playback never uses this path.
-            enableDynamicBackground = true
+            // We invalidate these panels from the ScrollView's scroll callback
+            // instead of continuously redrawing them while the launcher is idle.
+            enableDynamicBackground = false
             backdropSource = backdrop
             setGlassTint(
                 if (accented) uiAccent else Color.rgb(18, 21, 32),
@@ -417,6 +422,7 @@ class MainActivity : Activity() {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ))
+            shellGlassPanels.add(this)
         }
 
     private fun addVoiceControl(parent: LinearLayout) {
@@ -649,7 +655,7 @@ class MainActivity : Activity() {
         action("aPFA v${appVersion()}", "Starzainia × HexagonMIDIs") {
             AlertDialog.Builder(this)
                 .setTitle("About aPFA")
-                .setMessage("aPFA v${appVersion()}\n\nStarzainia × HexagonMIDIs\n\nA PFA-faithful Android MIDI player.")
+                .setMessage("aPFA v${appVersion()}\n\nStarzainia × HexagonMIDIs\n\nA PFA-faithful Android MIDI player.\n\nLiquidGlass Android by pandadog / QWEA0 — MIT License.")
                 .setPositiveButton("OK", null)
                 .show()
         }
