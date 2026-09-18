@@ -6,8 +6,10 @@
 // g_engine pointer is therefore the only cross-thread shared state — atomic.
 #include <jni.h>
 #include <atomic>
+#include <cstdio>
 #include <string>
 #include <vector>
+#include <unistd.h>
 
 #include <android/log.h>
 #include <android/native_window.h>
@@ -24,6 +26,24 @@ ANativeWindow*             g_window = nullptr;   // UI-thread only
 // Engine::loadError() of the last nativeLoad, stashed here because a failed
 // load's engine is deleted before the UI thread can ask why it failed.
 std::atomic<int>           g_lastLoadError{0};
+
+uint64_t processRssBytes() {
+    // /proc/self/statm's second field is the number of resident pages. This is
+    // deliberately process-wide rather than MidiData::memoryBytes(): while a
+    // MIDI is parsing, the large event/sort/temp vectors still live in local
+    // parser state and are not visible through Engine::midi_ yet. RSS is the
+    // number that matters to Android's memory pressure/OOM decisions.
+    FILE* f = fopen("/proc/self/statm", "r");
+    if (!f) return 0;
+    unsigned long totalPages = 0;
+    unsigned long rssPages = 0;
+    const int got = fscanf(f, "%lu %lu", &totalPages, &rssPages);
+    fclose(f);
+    if (got != 2) return 0;
+    const long pageSize = sysconf(_SC_PAGESIZE);
+    if (pageSize <= 0) return 0;
+    return static_cast<uint64_t>(rssPages) * static_cast<uint64_t>(pageSize);
+}
 
 std::string jstr(JNIEnv* env, jstring s) {
     if (!s) return std::string();
@@ -76,6 +96,11 @@ JNIEXPORT jfloat JNICALL
 Java_com_apfaviz_PlaybackActivity_nativeGetLoadProgress(JNIEnv*, jobject) {
     apfa::Engine* e = g_engine.load();
     return e ? e->loadProgress().load() : 0.0f;
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_apfaviz_PlaybackActivity_nativeGetProcessMemoryBytes(JNIEnv*, jobject) {
+    return static_cast<jlong>(processRssBytes());
 }
 
 JNIEXPORT jlong JNICALL
