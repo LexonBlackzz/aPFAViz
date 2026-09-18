@@ -140,6 +140,9 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
 
         val midiUri = intent.getStringExtra(EXTRA_MIDI)
         if (midiUri == null) { finish(); return }
+        val midiSource = Uri.parse(midiUri)
+        val midiName = displayName(midiSource)
+        val midiBytes = displaySize(midiSource)
         val sfUri      = intent.getStringExtra(EXTRA_SF)
         val voiceCount = intent.getIntExtra(EXTRA_VOICES, 250)
         val noteSpeed  = intent.getFloatExtra(EXTRA_SPEED, 0.05f)
@@ -210,7 +213,13 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
                     else
                         "%,d notes  -  %.1f MB".format(nativeGetNoteCount(), mb)
                     Log.i("aPFA", infoLine)
-                    showPlaybackScreen()
+                    showReadyScreen(
+                        midiName = midiName,
+                        midiBytes = midiBytes,
+                        soundfontName = sfUri?.let { displayName(Uri.parse(it)) },
+                        voiceCount = voiceCount,
+                        noteSpeed = noteSpeed
+                    )
                 } else {
                     when (nativeGetLoadError()) {
                         1 -> fail("This Black MIDI likely needs Chunked Disk Streaming, " +
@@ -328,6 +337,218 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
             Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
             finish()
         }
+    }
+
+    // ---- ready screen -------------------------------------------------------
+    // nativeLoad() has already parsed/streamed the MIDI at this point, but there
+    // is deliberately no SurfaceView yet. The engine cannot start until the user
+    // presses Play, so this is a real "ready" state rather than decorative copy.
+    private fun showReadyScreen(
+        midiName: String,
+        midiBytes: Long,
+        soundfontName: String?,
+        voiceCount: Int,
+        noteSpeed: Float
+    ) {
+        ui.removeCallbacks(loadingPoll)
+
+        val root = FrameLayout(this).apply {
+            background = GradientDrawable(
+                GradientDrawable.Orientation.TL_BR,
+                intArrayOf(Color.rgb(20, 16, 38), Color.rgb(7, 9, 15), Color.rgb(8, 24, 28))
+            )
+        }
+        val page = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(20), dp(20), dp(20))
+        }
+
+        page.addView(TextView(this).apply {
+            text = "aPFA"
+            setTextColor(Color.WHITE)
+            textSize = 27f
+            typeface = Typeface.DEFAULT_BOLD
+        })
+        page.addView(TextView(this).apply {
+            text = "Ready to play"
+            setTextColor(Color.rgb(188, 194, 212))
+            textSize = 13f
+        }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { bottomMargin = dp(18) })
+
+        val fileCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+            background = transportPanelBackground()
+            elevation = dp(8).toFloat()
+        }
+        val fileHeader = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        fileHeader.addView(TextView(this).apply {
+            text = midiName
+            setTextColor(Color.WHITE)
+            textSize = 18f
+            typeface = Typeface.DEFAULT_BOLD
+            maxLines = 2
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        val change = Button(this).apply {
+            text = "Change"
+            isAllCaps = false
+            setTextColor(Color.rgb(203, 208, 223))
+            textSize = 12f
+            background = null
+            setOnClickListener { finish() }
+        }
+        fileHeader.addView(change)
+        fileCard.addView(fileHeader)
+
+        val noteCount = nativeGetNoteCount()
+        val totalUs = nativeGetTotalMicros()
+        val memoryMb = nativeGetMemoryBytes() / 1048576.0
+        val streamedMb = nativeGetStreamedBytes() / 1048576.0
+
+        fileCard.addView(TextView(this).apply {
+            text = buildString {
+                append("%,d notes".format(noteCount))
+                append("   •   ")
+                append(formatDuration(totalUs))
+                if (midiBytes > 0) {
+                    append("   •   ")
+                    append(formatBytes(midiBytes))
+                }
+            }
+            setTextColor(Color.rgb(203, 208, 223))
+            textSize = 13f
+        }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = dp(10) })
+
+        fileCard.addView(TextView(this).apply {
+            text = if (streamedMb > 0)
+                "%.1f MB RAM   •   %.1f MB streamed".format(memoryMb, streamedMb)
+            else
+                "%.1f MB RAM".format(memoryMb)
+            setTextColor(Color.rgb(166, 174, 195))
+            textSize = 12f
+        }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = dp(5) })
+
+        page.addView(fileCard, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ))
+
+        // SoundFont is a compact setting here rather than a second primary action.
+        page.addView(TextView(this).apply {
+            text = "SoundFont"
+            setTextColor(Color.rgb(166, 174, 195))
+            textSize = 12f
+        }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = dp(18) })
+        page.addView(TextView(this).apply {
+            text = soundfontName ?: "No SoundFont"
+            setTextColor(Color.rgb(45, 212, 191))
+            textSize = 14f
+            typeface = Typeface.DEFAULT_BOLD
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = dp(4) })
+
+        val quick = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+            background = transportPanelBackground()
+        }
+        quick.addView(TextView(this).apply {
+            text = "Quick settings"
+            setTextColor(Color.WHITE)
+            textSize = 16f
+            typeface = Typeface.DEFAULT_BOLD
+        })
+        quick.addView(TextView(this).apply {
+            text = "Voice Count   $voiceCount"
+            setTextColor(Color.rgb(203, 208, 223))
+            textSize = 13f
+        }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = dp(12) })
+        quick.addView(TextView(this).apply {
+            text = "Note Speed   %.3f×".format(noteSpeed)
+            setTextColor(Color.rgb(203, 208, 223))
+            textSize = 13f
+        }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = dp(8) })
+        page.addView(quick, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = dp(18) })
+
+        root.addView(page, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { gravity = Gravity.TOP })
+
+        val play = Button(this).apply {
+            text = "Play"
+            isAllCaps = false
+            textSize = 17f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(Color.WHITE)
+            setOnClickListener { showPlaybackScreen() }
+        }
+        styleTransportButton(play)
+        root.addView(play, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(58)
+        ).apply {
+            gravity = Gravity.BOTTOM
+            setMargins(dp(20), 0, dp(20), dp(20))
+        })
+
+        setContentView(root)
+    }
+
+    private fun formatDuration(micros: Long): String {
+        val total = (micros.coerceAtLeast(0L) / 1_000_000L)
+        val h = total / 3600
+        val m = (total % 3600) / 60
+        val sec = total % 60
+        return if (h > 0) "%d:%02d:%02d".format(h, m, sec)
+               else "%d:%02d".format(m, sec)
+    }
+
+    private fun formatBytes(bytes: Long): String = when {
+        bytes >= 1024L * 1024L * 1024L -> "%.2f GB".format(bytes / 1073741824.0)
+        bytes >= 1024L * 1024L -> "%.1f MB".format(bytes / 1048576.0)
+        bytes >= 1024L -> "%.1f KB".format(bytes / 1024.0)
+        else -> "$bytes B"
+    }
+
+    private fun displaySize(uri: Uri): Long {
+        try {
+            contentResolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { c ->
+                if (c.moveToFirst()) {
+                    val idx = c.getColumnIndex(OpenableColumns.SIZE)
+                    if (idx >= 0 && !c.isNull(idx)) return c.getLong(idx)
+                }
+            }
+        } catch (_: Exception) {}
+        return -1L
     }
 
     // ---- playback screen ----
