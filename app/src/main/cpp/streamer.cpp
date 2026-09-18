@@ -462,24 +462,10 @@ struct EmitSink {
     int      ticksPerQuarter = 480;
     size_t   trackSampleStep = 4096;
 
-    // Sliced loads never map the pool, so there is no address to bake into
-    // `sister`: store the partner's POOL INDEX + 1 (0 = none) in the same field
-    // instead and let the slice materialiser turn it into an arena address.
-    // Same struct, same 56 bytes, same passes.
-    bool     encodeIdx = false;
-    PlayEvent* sisterAt(size_t poolIdx) const {
-        if (encodeIdx)
-            return reinterpret_cast<PlayEvent*>(static_cast<uintptr_t>(poolIdx) + 1);
-        return reinterpret_cast<PlayEvent*>(poolAddrIn(*poolSegs, poolIdx * kEventSize));
-    }
-    // sister = &pool[0]: midi_parser.cpp's final index->pointer pass turns the
-    // parse-time nullptr (index 0) into a pointer at the pool base for every
-    // non-note event. Reproduce the artifact exactly; sliced loads encode it as
-    // 0 and the materialiser resolves it to the arena base.
-    PlayEvent* sisterNone() const {
-        if (encodeIdx) return nullptr;
-        return reinterpret_cast<PlayEvent*>(poolAddrIn(*poolSegs, 0));
-    }
+    // Pool events store partner POOL INDICES in PlayEvent::link while the
+    // streamer builds its resident time-position link table. Playback never
+    // depends on a pointer baked into the file mapping.
+    bool     encodeIdx = false;  // sliced-mode switch for resident seek payloads
 
     // outputs
     std::vector<Fixup>   fixups;         // cross-buffer sister patches (RAM; rare)
@@ -583,7 +569,7 @@ struct EmitSink {
         if (us > 0xFFFFFFFFull) us = 0xFFFFFFFFull;   // parser's per-event cap
         if (us > totalUs) totalUs = us;
         PlayEvent out = e;
-        out.absMicroSec = static_cast<int64_t>(us);
+        out.absMicroSec = static_cast<uint32_t>(us);
         buf.push_back(out);
         if (buf.size() >= kBufEvents) flush();
         runBuf.push_back({ (us << 19) |
@@ -600,28 +586,27 @@ struct EmitSink {
 
     uint32_t noteOn(int t, uint32_t tick, int ch, int key, int vel) {
         int c = ch & 0x0F;
-        PlayEvent e{ 0, 0x90 | c, t, 0, static_cast<int32_t>(tick),
-                     0 /*µs set in emit*/, kNoteOn, 0,
-                     static_cast<uint8_t>(c), static_cast<uint8_t>(key & 0x7F),
-                     static_cast<uint8_t>(vel & 0x7F),
-                     sisterNone() /*patched by noteOff*/,
-                     0, nullptr };
+        PlayEvent e{
+            0, kNoEventLink, static_cast<uint16_t>(t),
+            static_cast<uint8_t>(0x90 | c), static_cast<uint8_t>(key & 0x7F),
+            static_cast<uint8_t>(vel & 0x7F), static_cast<uint8_t>(c),
+            static_cast<uint8_t>(kNoteOn), 0
+        };
         return emit(e, t, tick, kNoteOn);
     }
 
     void noteOff(int t, uint32_t tick, int ch, int key, uint32_t onIdx) {
         int c = ch & 0x0F;
-        PlayEvent e{ 0, 0x80 | c, t, 0, static_cast<int32_t>(tick),
-                     0, kNoteOff, 0,
-                     static_cast<uint8_t>(c), static_cast<uint8_t>(key & 0x7F), 0,
-                     sisterAt(onIdx),
-                     0, nullptr };
+        PlayEvent e{
+            0, onIdx, static_cast<uint16_t>(t),
+            static_cast<uint8_t>(0x80 | c), static_cast<uint8_t>(key & 0x7F), 0,
+            static_cast<uint8_t>(c), static_cast<uint8_t>(kNoteOff), 0
+        };
         uint32_t offIdx = emit(e, t, tick, kNoteOff);
         pairBuf.push_back({ onIdx, offIdx });
         if (chunked && pairBuf.size() >= kPairBufEntries) spillPairs();
-        PlayEvent* sisterPtr = sisterAt(offIdx);
         if (onIdx >= bufStart) {
-            buf[onIdx - bufStart].sister = sisterPtr;
+            buf[onIdx - bufStart].link = offIdx;
         } else {
             fixups.push_back({ onIdx, offIdx });
         }
@@ -630,9 +615,11 @@ struct EmitSink {
     void channelEvent(int t, uint32_t tick, uint8_t status, uint8_t p1, uint8_t p2) {
         int c    = status & 0x0F;
         int type = status >> 4;
-        PlayEvent e{ 0, status, t, 0, static_cast<int32_t>(tick),
-                     0, type, 0,
-                     static_cast<uint8_t>(c), p1, p2, sisterNone(), 0, nullptr };
+        PlayEvent e{
+            0, kNoEventLink, static_cast<uint16_t>(t),
+            status, p1, p2, static_cast<uint8_t>(c),
+            static_cast<uint8_t>(type), 0
+        };
         uint32_t idx = emit(e, t, tick, type);
         // The three types Engine::playSkippedEvents replays on a seek. Only the
         // sliced path needs them resident (see PcRaw); encodeIdx is exactly that
@@ -1384,7 +1371,7 @@ bool Streamer::open(const std::string& midiPath, MidiData& out,
             }
             while (i < emit.fixups.size() && emit.fixups[i].onIdx < c0 + n) {
                 const Fixup& f = emit.fixups[i];
-                chunk[f.onIdx - c0].sister = emit.sisterAt(f.offIdx);
+                chunk[f.onIdx - c0].link = f.offIdx;
                 i++;
             }
             if (!poolPwrite(poolFds, chunk.data(), n * kEventSize, off)) {
@@ -2047,22 +2034,9 @@ bool Streamer::buildSlice(int sliceIdx, SliceMap& out) {
         }
         for (size_t k = i; k <= j; k++) {
             PlayEvent e = rbuf[need[k].poolIdx - base];
-            // Pass B stored the partner's POOL INDEX + 1 in `sister` (0 for a
-            // non-note event, whose sister is PFA's &pool[0] artifact). Resolve
-            // it against the arena: every partner is in this slice by
-            // construction — a note-on's off is in the body or the carry-out, a
-            // note-off's on is in the body or the carry-in.
-            uintptr_t enc = reinterpret_cast<uintptr_t>(e.sister);
-            size_t slot = 0;
-            if (enc != 0) {
-                uint32_t partner = static_cast<uint32_t>(enc - 1);
-                const Need* f = std::lower_bound(
-                    need.data(), need.data() + need.size(), partner,
-                    [](const Need& a, uint32_t v) { return a.poolIdx < v; });
-                if (f != need.data() + need.size() && f->poolIdx == partner)
-                    slot = static_cast<size_t>(f - need.data());
-            }
-            e.sister = reinterpret_cast<PlayEvent*>(arenaBase + slot * kEventSize);
+            // PlayEvent::link remains the partner's pool index in the backing
+            // pool. Engine playback uses sisterPos_ (global time-order links),
+            // so slices no longer need to manufacture partner pointers.
 
             // The loader's per-track index, rebuilt against slot numbers. Pool
             // order is track-major, so tracks arrive in ascending order and
