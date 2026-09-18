@@ -3,6 +3,15 @@ plugins {
     id 'org.jetbrains.kotlin.android'
 }
 
+// Optional local release signing. Copy keystore.properties.example to
+// keystore.properties and fill it in; the real file and keystore stay out of Git.
+def keystorePropertiesFile = rootProject.file('keystore.properties')
+def keystoreProperties = new Properties()
+def hasReleaseKeystore = keystorePropertiesFile.exists()
+if (hasReleaseKeystore) {
+    keystorePropertiesFile.withInputStream { keystoreProperties.load(it) }
+}
+
 android {
     namespace 'com.apfa'
     compileSdk 34
@@ -10,6 +19,17 @@ android {
     // Android 6.0+ so the UI can use the modern platform APIs without carrying
     // Gingerbread/pre-SAF compatibility code.
     ndkVersion '21.4.7075529'
+
+    signingConfigs {
+        release {
+            if (hasReleaseKeystore) {
+                storeFile rootProject.file(keystoreProperties['storeFile'])
+                storePassword keystoreProperties['storePassword']
+                keyAlias keystoreProperties['keyAlias']
+                keyPassword keystoreProperties['keyPassword']
+            }
+        }
+    }
 
     defaultConfig {
         applicationId 'com.apfa'
@@ -38,6 +58,16 @@ android {
     // Pack the prebuilt BASS / BASSMIDI .so files into the APK.
     sourceSets {
         main.jniLibs.srcDirs += ['../bass24-android/libs', '../bassmidi24-android/libs']
+    }
+
+    buildTypes {
+        release {
+            if (hasReleaseKeystore) {
+                signingConfig signingConfigs.release
+            } else {
+                logger.lifecycle('Release signing disabled: create keystore.properties to produce a signed APK.')
+            }
+        }
     }
 
     compileOptions {
