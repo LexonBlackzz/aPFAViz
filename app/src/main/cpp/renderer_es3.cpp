@@ -399,7 +399,10 @@ void RendererES3::layoutKeyboard(int startNote, int endNote) {
         }
 
         keyX_[k] = ww * (iWhiteKeys + fStartX);
+        keyLayoutUniform_[k * 2]     = keyX_[k];
+        keyLayoutUniform_[k * 2 + 1] = keyW_[k];
     }
+    keyLayoutDirty_ = true;
 }
 
 // ---- font texture -----------------------------------------------------------
@@ -427,7 +430,18 @@ bool RendererES3::buildPrograms() {
     skewProg_ = linkProgram(kSkewVS, kSkewFS);
     textProg_ = linkProgram(kTextVS, kTextFS);
     bgProg_   = linkProgram(kBgVS,   kBgFS);
-    return noteProg_ && rectProg_ && gradProg_ && skewProg_ && textProg_ && bgProg_;
+    if (!(noteProg_ && rectProg_ && gradProg_ && skewProg_ && textProg_ && bgProg_))
+        return false;
+
+    noteUClock_    = glGetUniformLocation(noteProg_, "uClockSec");
+    noteUWindow_   = glGetUniformLocation(noteProg_, "uWindowSec");
+    noteUKbFrac_   = glGetUniformLocation(noteProg_, "uKbFrac");
+    noteUViewport_ = glGetUniformLocation(noteProg_, "uViewportPx");
+    noteUKey_      = glGetUniformLocation(noteProg_, "uKey");
+    noteUWhiteKey_ = glGetUniformLocation(noteProg_, "uWhiteKeyPx");
+    bgUYBottom_    = glGetUniformLocation(bgProg_, "uYBottom");
+    bgUTex_        = glGetUniformLocation(bgProg_, "uTex");
+    return true;
 }
 
 // ---- EGL init ---------------------------------------------------------------
@@ -1110,10 +1124,10 @@ void RendererES3::render(float clockSec, float totalSec, float fps,
         // One quad stretched across the note field (aspect not preserved). The
         // octave-split lines are skipped so the image reads cleanly behind notes.
         glUseProgram(bgProg_);
-        glUniform1f(glGetUniformLocation(bgProg_, "uYBottom"), 2.0f * kbFrac_ - 1.0f);
+        glUniform1f(bgUYBottom_, 2.0f * kbFrac_ - 1.0f);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, bgTex_);
-        glUniform1i(glGetUniformLocation(bgProg_, "uTex"), 0);
+        glUniform1i(bgUTex_, 0);
         pBindVertexArray_(bgVao_);
         glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
         pBindVertexArray_(0);
@@ -1149,23 +1163,19 @@ void RendererES3::render(float clockSec, float totalSec, float fps,
     // renderer no longer rescans/copies the entire visible set twice.
     if (!whiteNotes.empty() || !sharpNotes.empty()) {
         glUseProgram(noteProg_);
-        glUniform1f(glGetUniformLocation(noteProg_, "uClockSec"), clockSec);
-        glUniform1f(glGetUniformLocation(noteProg_, "uWindowSec"),
-                    windowSec > 1e-6f ? windowSec : 1e-6f);
-        glUniform1f(glGetUniformLocation(noteProg_, "uKbFrac"), kbFrac_);
-        glUniform2f(glGetUniformLocation(noteProg_, "uViewportPx"),
-                    (float)width_, (float)height_);
-        float keyLayout[256];
-        for (int k = 0; k < 128; k++) {
-            keyLayout[k*2]   = keyX_[k];
-            keyLayout[k*2+1] = keyW_[k];
+        glUniform1f(noteUClock_, clockSec);
+        glUniform1f(noteUWindow_, windowSec > 1e-6f ? windowSec : 1e-6f);
+        glUniform1f(noteUKbFrac_, kbFrac_);
+        glUniform2f(noteUViewport_, (float)width_, (float)height_);
+        if (keyLayoutDirty_) {
+            glUniform2fv(noteUKey_, 128, keyLayoutUniform_);
+            keyLayoutDirty_ = false;
         }
-        glUniform2fv(glGetUniformLocation(noteProg_, "uKey"), 128, keyLayout);
         float whiteKeyPx = 0.0f;
         for (int k = startNote_; k <= endNote_; k++) {
             if (!pfaIsSharp(k)) { whiteKeyPx = keyW_[k] * (float)width_; break; }
         }
-        glUniform1f(glGetUniformLocation(noteProg_, "uWhiteKeyPx"), whiteKeyPx);
+        glUniform1f(noteUWhiteKey_, whiteKeyPx);
         pBindVertexArray_(noteVao_);
         glBindBuffer(GL_ARRAY_BUFFER, instVbo_);
 
