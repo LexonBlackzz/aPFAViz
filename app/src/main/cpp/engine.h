@@ -115,6 +115,10 @@ private:
     // events[pos]'s time without dereferencing it — a sliced streaming load
     // maps only one slice at a time (streamer.h).
     int64_t eventUsAt(size_t pos) const;
+    // Matching note event position without a sister pointer. Streaming loads
+    // answer from Streamer's resident 4-byte link table; in-RAM loads use the
+    // compact event's already-remapped link.
+    uint32_t partnerPosAt(size_t pos) const;
     void advancePcCursor();
     void playSkippedEvents(size_t oldPcCursor);
 
