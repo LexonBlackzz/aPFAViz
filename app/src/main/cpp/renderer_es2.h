@@ -28,21 +28,17 @@
 
 namespace apfa {
 
-// RendererES2's private per-instance note layout (36 bytes). Same fields as the
-// shared NoteInstance plus keyX/keyW, which the renderer fills from keyX_/keyW_
-// because GLSL ES 1.00 cannot dynamically index a per-key uniform array. The
-// kNoteAttrs table in renderer.cpp matches this exact field order/offsets.
+// RendererES2's private 20-byte record. keyX/keyW are resolved CPU-side
+// because GLSL ES 1.00 cannot dynamically index a per-key uniform array. Dark
+// shades are derived from colorPrimary in the fragment shader.
 struct NoteInstanceES2 {
     float    startSec;
     float    durSec;
-    float    key;
-    float    keyX;         // normalised x of the key's left edge
-    float    keyW;         // normalised key width
+    float    keyX;
+    float    keyW;
     uint32_t colorPrimary;
-    uint32_t colorDark;
-    uint32_t colorVeryDark;
-    uint32_t isSharp;
 };
+static_assert(sizeof(NoteInstanceES2) == 20, "NoteInstanceES2 must stay 20 bytes");
 
 // Per-instance vertex attribute descriptor (location 0 is reserved for the unit-quad
 // corner and handled internally by RendererES2::drawInstanced).
