@@ -63,6 +63,7 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
         // Cap the decoded background so it fits comfortably in a GL texture on
         // budget devices; it's stretched anyway, so detail loss is fine.
         private const val BG_MAX_DIM = 1280
+        private const val CHROME_HIDE_DELAY_MS = 3000L
 
         // Ceilings for rebuilding an SFZ instrument in the cache (below). An
         // .sfz can name a whole sample library; these stop a mis-pick filling
@@ -110,6 +111,9 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
     private external fun nativeGetMinMicros(): Long
     private external fun nativeGetMaxMicros(): Long
     private external fun nativeGetFps(): Float
+    private external fun nativeGetActiveNotes(): Int
+    private external fun nativeGetNps(): Float
+    private external fun nativeGetPeakNps(): Float
     private external fun nativeSetBgColor(bgrColor: Int)
     private external fun nativeSetBgImage(pixels: IntArray, w: Int, h: Int)
 
@@ -126,10 +130,13 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
     private lateinit var pauseButton: Button
     private lateinit var seekBar: SeekBar
     private var uiHidden     = false
-    private var lastTapTime  = 0L
     private var holdFired    = false
+    private var lastStatsUpdateMs = 0L
 
     private lateinit var transportBar: View
+    private lateinit var statsPanel: TextView
+
+    private val hideChromeRunnable = Runnable { hideTransportAnimated() }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -562,8 +569,8 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
         root.addView(surface, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
 
-        // Hold (400 ms): pause/resume immediately when threshold is reached.
-        // Double-tap (two short taps < 300 ms apart): hide/show transport chrome.
+        // Any touch reveals the transport immediately and restarts its idle timer.
+        // Holding for 400 ms keeps the existing PFA-style pause/resume gesture.
         val holdRunnable = Runnable {
             holdFired = true
             togglePause()
@@ -571,16 +578,13 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
         surface.setOnTouchListener { _, event ->
             when (event.actionMasked) {
                 android.view.MotionEvent.ACTION_DOWN -> {
+                    showTransportAndSchedule()
                     holdFired = false
                     ui.postDelayed(holdRunnable, 400L)
                 }
                 android.view.MotionEvent.ACTION_UP, android.view.MotionEvent.ACTION_CANCEL -> {
                     ui.removeCallbacks(holdRunnable)
-                    if (!holdFired) {
-                        val now = System.currentTimeMillis()
-                        if (now - lastTapTime < 300L) toggleUi()
-                        lastTapTime = now
-                    }
+                    if (!holdFired) showTransportAndSchedule()
                 }
             }
             true
@@ -623,7 +627,10 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
             thumbTintList = ColorStateList.valueOf(Color.rgb(139, 92, 246))
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {}
-                override fun onStartTrackingTouch(s: SeekBar?) { userSeeking = true }
+                override fun onStartTrackingTouch(s: SeekBar?) {
+                    userSeeking = true
+                    showTransportAndSchedule()
+                }
                 override fun onStopTrackingTouch(s: SeekBar?) {
                     val minU = nativeGetMinMicros()
                     val maxU = nativeGetMaxMicros()
@@ -631,6 +638,7 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
                         nativeSeek(minU + (maxU - minU) *
                             (s?.progress ?: 0).toLong() / 1000L)
                     userSeeking = false
+                    showTransportAndSchedule()
                 }
             })
         }
@@ -657,6 +665,31 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
             setMargins(dp(14), dp(14), dp(14), 0)
         })
 
+        // Rich live stats live in Android UI rather than being baked into the
+        // GL piano roll. They update at 4 Hz, independently of the engine frame loop.
+        statsPanel = TextView(this).apply {
+            setTextColor(Color.WHITE)
+            textSize = 12f
+            typeface = Typeface.MONOSPACE
+            setLineSpacing(0f, 1.16f)
+            setPadding(dp(12), dp(9), dp(12), dp(9))
+            maxWidth = dp(360)
+            text = "FPS --   NPS --   PEAK --\nACTIVE --   NOTES --\n0:00 / 0:00   •   0%"
+            background = GradientDrawable().apply {
+                cornerRadius = dp(14).toFloat()
+                setColor(Color.argb(205, 11, 14, 23))
+                setStroke(dp(1), Color.argb(80, 45, 212, 191))
+            }
+            elevation = dp(7).toFloat()
+        }
+        root.addView(statsPanel, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.END
+            setMargins(dp(14), dp(88), dp(14), 0)
+        })
+
         loadingOverlay = TextView(this).apply {
             setTextColor(Color.WHITE)
             textSize = 16f
@@ -671,8 +704,8 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
         ui.post(seekPoll)
     }
 
-    // Seek bar poll — 16 ms matches display refresh. Only updates the seek bar
-    // thumb position; Time and FPS are rendered by GL, not here.
+    // Seek bar stays display-rate smooth; richer stats update at 4 Hz so formatting
+    // strings never becomes part of the native render/dispatch hot path.
     private val seekPoll = object : Runnable {
         override fun run() {
             if (stopped) return
@@ -681,10 +714,18 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
             val maxU = nativeGetMaxMicros()
             if (::seekBar.isInitialized && !userSeeking && maxU > minU)
                 seekBar.progress = (((t - minU) * 1000L) / (maxU - minU)).toInt()
+
+            val nowMs = System.currentTimeMillis()
+            if (::statsPanel.isInitialized && nowMs - lastStatsUpdateMs >= 250L) {
+                updateStatsPanel(t)
+                lastStatsUpdateMs = nowMs
+            }
+
             if (::loadingOverlay.isInitialized &&
                 loadingOverlay.visibility == View.VISIBLE) {
                 if (nativeIsPlaying()) {
                     loadingOverlay.visibility = View.GONE
+                    showTransportAndSchedule()
                 } else {
                     // Engine aborted during start-up (synth or GL init). Show why
                     // instead of an infinite "Starting…" and stop polling — the
@@ -724,10 +765,65 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
     override fun onPause()  { super.onPause();  nativePause() }
     override fun onResume() { super.onResume(); if (!paused) nativeResume() }
 
-    private fun toggleUi() {
+    private fun hideTransportAnimated() {
+        if (!::transportBar.isInitialized || uiHidden || userSeeking) return
+        uiHidden = true
+        ui.removeCallbacks(hideChromeRunnable)
+        val travel = (if (transportBar.height > 0) transportBar.height else dp(72)) + dp(24)
+        transportBar.animate()
+            .cancel()
+        transportBar.animate()
+            .translationY(-travel.toFloat())
+            .alpha(0f)
+            .setDuration(220L)
+            .start()
+    }
+
+    private fun showTransportAndSchedule() {
         if (!::transportBar.isInitialized) return
-        uiHidden = !uiHidden
-        transportBar.visibility = if (uiHidden) View.GONE else View.VISIBLE
+        ui.removeCallbacks(hideChromeRunnable)
+        uiHidden = false
+        transportBar.visibility = View.VISIBLE
+        transportBar.animate()
+            .cancel()
+        transportBar.animate()
+            .translationY(0f)
+            .alpha(1f)
+            .setDuration(180L)
+            .start()
+        ui.postDelayed(hideChromeRunnable, CHROME_HIDE_DELAY_MS)
+    }
+
+    private fun updateStatsPanel(timeUs: Long) {
+        if (!::statsPanel.isInitialized) return
+        val totalUs = nativeGetTotalMicros().coerceAtLeast(0L)
+        val fps = nativeGetFps()
+        val nps = nativeGetNps().coerceAtLeast(0f)
+        val peak = nativeGetPeakNps().coerceAtLeast(0f)
+        val active = nativeGetActiveNotes().coerceAtLeast(0)
+        val notes = nativeGetNoteCount().coerceAtLeast(0L)
+        val progress = if (totalUs > 0L)
+            ((timeUs.coerceIn(0L, totalUs) * 100L) / totalUs).toInt()
+        else 0
+
+        statsPanel.text =
+            "FPS %4.1f   NPS %,d   PEAK %,d\nACTIVE %,d   NOTES %,d\n%s / %s   •   %d%%".format(
+                fps, nps.toLong(), peak.toLong(), active, notes,
+                formatPlaybackTime(timeUs), formatPlaybackTime(totalUs), progress
+            )
+    }
+
+    private fun formatPlaybackTime(micros: Long): String {
+        val negative = micros < 0L
+        val totalSeconds = kotlin.math.abs(micros) / 1_000_000L
+        val hours = totalSeconds / 3600L
+        val minutes = (totalSeconds % 3600L) / 60L
+        val seconds = totalSeconds % 60L
+        val value = if (hours > 0)
+            "%d:%02d:%02d".format(hours, minutes, seconds)
+        else
+            "%d:%02d".format(minutes, seconds)
+        return if (negative) "-$value" else value
     }
 
     private fun togglePause() {
@@ -735,6 +831,7 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
         if (paused) nativePause() else nativeResume()
         if (::pauseButton.isInitialized)
             pauseButton.text = if (paused) "▶" else "❚❚"
+        showTransportAndSchedule()
     }
 
     private fun transportPanelBackground(): GradientDrawable =
