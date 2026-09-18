@@ -3,21 +3,39 @@ plugins {
     id 'org.jetbrains.kotlin.android'
 }
 
+// Optional local release signing. Copy keystore.properties.example to
+// keystore.properties and fill it in; the real file and keystore stay out of Git.
+def keystorePropertiesFile = rootProject.file('keystore.properties')
+def keystoreProperties = new Properties()
+def hasReleaseKeystore = keystorePropertiesFile.exists()
+if (hasReleaseKeystore) {
+    keystorePropertiesFile.withInputStream { keystoreProperties.load(it) }
+}
+
 android {
     namespace 'com.apfa'
     compileSdk 34
-    // NDK r21 is the last release whose binaries load below API 21 (r26 refuses
-    // to target <21 outright). It clamps native compilation to android-16 and
-    // links libandroid_support + sysv hash tables, which is what lets the .so
-    // resolve on Gingerbread's linker. Same toolchain Lexon's 2.3 branch shipped.
+    // Keep the proven native toolchain for now. The app itself now targets
+    // Android 6.0+ so the UI can use the modern platform APIs without carrying
+    // Gingerbread/pre-SAF compatibility code.
     ndkVersion '21.4.7075529'
+
+    signingConfigs {
+        release {
+            if (hasReleaseKeystore) {
+                storeFile rootProject.file(keystoreProperties['storeFile'])
+                storePassword keystoreProperties['storePassword']
+                keyAlias keystoreProperties['keyAlias']
+                keyPassword keystoreProperties['keyPassword']
+            }
+        }
+    }
 
     defaultConfig {
         applicationId 'com.apfa'
-        // Android 2.3.3 (Gingerbread). BASS itself needs 2.3.3+, so API 10 is
-        // the true floor, not 9. Below API 19 the app swaps SAF for the
-        // built-in file browser (MainActivity.pickFile).
-        minSdk 10
+        // Android 6.0 (Marshmallow). This deliberately drops the legacy
+        // Gingerbread/pre-SAF UI paths and gives the shell a clean modern floor.
+        minSdk 23
         targetSdk 34
         versionCode 17
         versionName '1.3.1'
@@ -40,6 +58,16 @@ android {
     // Pack the prebuilt BASS / BASSMIDI .so files into the APK.
     sourceSets {
         main.jniLibs.srcDirs += ['../bass24-android/libs', '../bassmidi24-android/libs']
+    }
+
+    buildTypes {
+        release {
+            if (hasReleaseKeystore) {
+                signingConfig signingConfigs.release
+            } else {
+                logger.lifecycle('Release signing disabled: create keystore.properties to produce a signed APK.')
+            }
+        }
     }
 
     compileOptions {

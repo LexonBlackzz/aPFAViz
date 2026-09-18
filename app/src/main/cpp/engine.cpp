@@ -547,6 +547,10 @@ void Engine::threadMain() {
     ldrFltLast_ = streamer_.loaderMajFlt();
 #endif
     polySum_ = polyMax_ = dispEvents_ = 0;
+    noteOnsWindow_ = 0;
+    pubActiveNotes_.store(0);
+    pubNps_.store(0.0f);
+    pubPeakNps_.store(0.0f);
     playing_ = true;
 #ifdef APFA_STREAMING
     clearLoadMarker();   // load + startup survived: this MIDI fits this mode
@@ -633,6 +637,7 @@ void Engine::frame() {
 
     // --- metrics ---
     pubTimeUs_.store(static_cast<int64_t>(clockUs_));
+    pubActiveNotes_.store(static_cast<int>(active_.size()));
     fpsFrames_++;
     polySum_ += active_.size();
     if (active_.size() > polyMax_) polyMax_ = active_.size();
@@ -650,6 +655,10 @@ void Engine::frame() {
         cpuLastUs_ = cpuNow;
         float fps = fpsFrames_ * 1e6f / static_cast<float>(window);
         pubFps_.store(fps);
+        float nps = noteOnsWindow_ * 1e6f / static_cast<float>(window);
+        pubNps_.store(nps);
+        float peak = pubPeakNps_.load();
+        if (nps > peak) pubPeakNps_.store(nps);
         int frames = fpsFrames_;
         fpsFrames_ = 0;
         uint64_t sc = 0, su = 0, bp = 0;
@@ -700,6 +709,7 @@ void Engine::frame() {
         sumDispatchUs_ = sumBuildUs_ = 0;
         maxDispatchUs_ = maxBuildUs_ = 0;
         polySum_ = polyMax_ = dispEvents_ = 0;
+        noteOnsWindow_ = 0;
     }
 }
 
@@ -728,6 +738,7 @@ void Engine::dispatch() {
                 synth_.noteOn(ch, key, e->param2);
                 active_.push_back(static_cast<int>(eventCursor_));
                 noteState_[key] = static_cast<int>(eventCursor_);
+                ++noteOnsWindow_;
             } else {
                 synth_.noteOff(ch, key);
                 noteState_[key] = -1;

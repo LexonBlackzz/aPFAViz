@@ -78,7 +78,7 @@ public:
     void start(void* surface);
     void stop();
     void surfaceChanged(int w, int h);
-    void pause()  { paused_ = true; }
+    void pause()  { paused_ = true; pubNps_.store(0.0f); }
     void resume() { paused_ = false; }
     void seek(int64_t micros);
     void setBgColor(uint32_t bgrColor) { bgColor_.store(bgrColor); }
@@ -97,6 +97,9 @@ public:
     int64_t minTimeUs() const { return firstNoteUs_ - 3000000; }
     int64_t maxTimeUs() const { return midi_.totalUs + 500000; }
     float   fps()       const { return pubFps_.load(); }
+    int     activeNotes() const { return pubActiveNotes_.load(); }
+    float   nps()       const { return pubNps_.load(); }
+    float   peakNps()   const { return pubPeakNps_.load(); }
 
     // Start-up failure code, surfaced to the UI so an init failure shows a real
     // message instead of an infinite "Starting…". 0 = none/still starting/ok.
@@ -185,6 +188,10 @@ private:
     std::atomic<float>   loadProgress_{0.0f};
     std::atomic<int64_t> pubTimeUs_{0};
     std::atomic<float>   pubFps_{0.0f};
+    std::atomic<int>     pubActiveNotes_{0};
+    std::atomic<float>   pubNps_{0.0f};
+    std::atomic<float>   pubPeakNps_{0.0f};
+    uint64_t noteOnsWindow_ = 0;
     int      fpsFrames_ = 0;
     uint64_t fpsLastUs_ = 0;
     uint64_t cpuLastUs_ = 0;

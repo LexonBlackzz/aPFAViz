@@ -17,12 +17,7 @@ import java.io.File
  * The option is offered only where it can actually work. Three hard gates,
  * checked in this order so the user sees the first thing that is wrong:
  *
- *  1. **Android 4.4 (KitKat) or newer.** `getExternalCacheDirs()` — the only
- *     way to get an app-writable, permission-free path on a secondary volume —
- *     arrived in API 19. Before that the card is reachable only through
- *     vendor-specific paths that need WRITE_EXTERNAL_STORAGE and are not
- *     app-private.
- *  2. **A 64-bit process**, which needs both a 64-bit CPU and a 64-bit
+ *  1. **A 64-bit process**, which needs both a 64-bit CPU and a 64-bit
  *     Android build. These are reported separately only so the message can be
  *     honest about which one is missing: a 32-bit ROM makes a 64-bit SoC look
  *     like an ARMv7 part in /proc/cpuinfo, so a phone is never told its
@@ -45,8 +40,6 @@ object SdCard {
      * wrong rather than just that something is.
      */
     fun unavailableReason(ctx: Context): String? {
-        if (Build.VERSION.SDK_INT < 19)
-            return "Needs Android 4.4 (KitKat) or newer."
         // A 32-bit process is the hard blocker; whether the CPU or the OS is
         // responsible only changes what we can honestly tell the user. Never
         // claim the processor is 32-bit unless nothing suggests otherwise — a
@@ -70,7 +63,6 @@ object SdCard {
      * path is app-private on every API level from 19 up.
      */
     fun cacheDir(ctx: Context): File? {
-        if (Build.VERSION.SDK_INT < 19) return null
         // Slot 0 is the built-in "external" storage — emulated, and on the same
         // physical flash as internal, so moving the pagefile there buys
         // nothing. Slots after it are separate volumes, i.e. the card. A null
@@ -109,7 +101,7 @@ object SdCard {
     // something it isn't.
     private fun isCpu64Bit(): Boolean {
         // A ROM that lists 64-bit ABIs settles it (API 21+).
-        if (Build.VERSION.SDK_INT >= 21 && Build.SUPPORTED_64_BIT_ABIS.isNotEmpty())
+        if (Build.SUPPORTED_64_BIT_ABIS.isNotEmpty())
             return true
         // 32-bit ROM: ask the kernel. This is only ever allowed to promote a
         // "no" to a "yes" — every test below is one-way evidence OF 64-bit, and
@@ -144,12 +136,6 @@ object SdCard {
         }
     }
 
-    // Is THIS process 64-bit? Below API 23 there is no direct answer, but a ROM
-    // with no 64-bit ABIs can only be running us 32-bit, and 64-bit ROMs do not
-    // predate API 21.
-    private fun isProcess64Bit(): Boolean = when {
-        Build.VERSION.SDK_INT >= 23 -> android.os.Process.is64Bit()
-        Build.VERSION.SDK_INT >= 21 -> Build.SUPPORTED_64_BIT_ABIS.isNotEmpty()
-        else -> false
-    }
+    // API 23+ exposes the process ABI directly.
+    private fun isProcess64Bit(): Boolean = android.os.Process.is64Bit()
 }

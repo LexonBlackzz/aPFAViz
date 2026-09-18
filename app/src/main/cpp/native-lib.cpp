@@ -194,6 +194,24 @@ Java_com_apfa_PlaybackActivity_nativeGetFps(JNIEnv*, jobject) {
     return e ? e->fps() : 0.0f;
 }
 
+JNIEXPORT jint JNICALL
+Java_com_apfa_PlaybackActivity_nativeGetActiveNotes(JNIEnv*, jobject) {
+    apfa::Engine* e = g_engine.load();
+    return e ? e->activeNotes() : 0;
+}
+
+JNIEXPORT jfloat JNICALL
+Java_com_apfa_PlaybackActivity_nativeGetNps(JNIEnv*, jobject) {
+    apfa::Engine* e = g_engine.load();
+    return e ? e->nps() : 0.0f;
+}
+
+JNIEXPORT jfloat JNICALL
+Java_com_apfa_PlaybackActivity_nativeGetPeakNps(JNIEnv*, jobject) {
+    apfa::Engine* e = g_engine.load();
+    return e ? e->peakNps() : 0.0f;
+}
+
 JNIEXPORT void JNICALL
 Java_com_apfa_PlaybackActivity_nativeSetBgColor(JNIEnv*, jobject, jint bgrColor) {
     apfa::Engine* e = g_engine.load();

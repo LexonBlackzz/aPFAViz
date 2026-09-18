@@ -1,0 +1,9 @@
+# Local Android/Gradle state
+.gradle/
+**/build/
+local.properties
+
+# Release signing secrets
+keystore.properties
+*.jks
+*.keystore

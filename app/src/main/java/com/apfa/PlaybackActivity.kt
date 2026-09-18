@@ -1,13 +1,15 @@
 package com.apfa
 
 import android.app.Activity
-import android.app.ActionBar
 import android.app.AlertDialog
+import android.content.res.ColorStateList
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.RippleDrawable
 import android.net.Uri
-import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -18,11 +20,11 @@ import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.View
 import android.view.ViewGroup
-import android.view.Window
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.LinearLayout
+import android.widget.ProgressBar
 import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
@@ -61,6 +63,7 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
         // Cap the decoded background so it fits comfortably in a GL texture on
         // budget devices; it's stretched anyway, so detail loss is fine.
         private const val BG_MAX_DIM = 1280
+        private const val CHROME_HIDE_DELAY_MS = 3000L
 
         // Ceilings for rebuilding an SFZ instrument in the cache (below). An
         // .sfz can name a whole sample library; these stop a mis-pick filling
@@ -108,6 +111,9 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
     private external fun nativeGetMinMicros(): Long
     private external fun nativeGetMaxMicros(): Long
     private external fun nativeGetFps(): Float
+    private external fun nativeGetActiveNotes(): Int
+    private external fun nativeGetNps(): Float
+    private external fun nativeGetPeakNps(): Float
     private external fun nativeSetBgColor(bgrColor: Int)
     private external fun nativeSetBgImage(pixels: IntArray, w: Int, h: Int)
 
@@ -124,26 +130,26 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
     private lateinit var pauseButton: Button
     private lateinit var seekBar: SeekBar
     private var uiHidden     = false
-    private var lastTapTime  = 0L
     private var holdFired    = false
+    private var lastStatsUpdateMs = 0L
 
-    // getActionBar() is API 11+; on Gingerbread the method does not exist and
-    // calling it throws NoSuchMethodError (an Error — catch(Exception) misses it).
-    // Below 11 we never touch it: playback runs bare on the fullscreen surface,
-    // no seek bar, hold-to-pause still works.
-    private val hasActionBar = Build.VERSION.SDK_INT >= Build.VERSION_CODES.HONEYCOMB
+    private lateinit var transportBar: View
+    private lateinit var statsPanel: TextView
+
+    private val hideChromeRunnable = Runnable { hideTransportAnimated() }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // Pre-Honeycomb the default theme has a title bar, and FLAG_FULLSCREEN only
-        // takes the status bar. Drop it so playback is truly fullscreen. Never do
-        // this at 11+ — it would remove the action bar we host the transport in.
-        if (!hasActionBar) requestWindowFeature(Window.FEATURE_NO_TITLE)
+        actionBar?.hide()
         window.addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        window.navigationBarColor = Color.rgb(7, 9, 15)
 
         val midiUri = intent.getStringExtra(EXTRA_MIDI)
         if (midiUri == null) { finish(); return }
+        val midiSource = Uri.parse(midiUri)
+        val midiName = displayName(midiSource)
+        val midiBytes = displaySize(midiSource)
         val sfUri      = intent.getStringExtra(EXTRA_SF)
         val voiceCount = intent.getIntExtra(EXTRA_VOICES, 250)
         val noteSpeed  = intent.getFloatExtra(EXTRA_SPEED, 0.05f)
@@ -214,7 +220,13 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
                     else
                         "%,d notes  -  %.1f MB".format(nativeGetNoteCount(), mb)
                     Log.i("aPFA", infoLine)
-                    showPlaybackScreen()
+                    showReadyScreen(
+                        midiName = midiName,
+                        midiBytes = midiBytes,
+                        soundfontName = sfUri?.let { displayName(Uri.parse(it)) },
+                        voiceCount = voiceCount,
+                        noteSpeed = noteSpeed
+                    )
                 } else {
                     when (nativeGetLoadError()) {
                         1 -> fail("This Black MIDI likely needs Chunked Disk Streaming, " +
@@ -248,14 +260,56 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
     // ---- loading screen ----
 
     private fun showLoadingScreen() {
+        val root = FrameLayout(this).apply { setBackgroundColor(Color.rgb(7, 9, 15)) }
+        root.background = GradientDrawable(
+            GradientDrawable.Orientation.TL_BR,
+            intArrayOf(Color.rgb(20, 16, 38), Color.rgb(7, 9, 15), Color.rgb(8, 24, 28))
+        )
+
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(dp(28), dp(26), dp(28), dp(26))
+            background = transportPanelBackground()
+            elevation = dp(10).toFloat()
+        }
+        card.addView(TextView(this).apply {
+            text = "aPFA"
+            setTextColor(Color.WHITE)
+            textSize = 30f
+            typeface = Typeface.DEFAULT_BOLD
+            letterSpacing = 0.03f
+        })
+        card.addView(TextView(this).apply {
+            text = "Preparing the engine"
+            setTextColor(Color.rgb(176, 184, 205))
+            textSize = 13f
+        }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = dp(2) })
+
+        val spinner = ProgressBar(this).apply {
+            isIndeterminate = true
+            indeterminateTintList = ColorStateList.valueOf(Color.rgb(45, 212, 191))
+        }
+        card.addView(spinner, LinearLayout.LayoutParams(dp(42), dp(42)).apply {
+            topMargin = dp(20)
+            bottomMargin = dp(14)
+        })
+
         loadingText = TextView(this).apply {
             setTextColor(Color.WHITE)
-            textSize = 18f
+            textSize = 15f
             gravity = Gravity.CENTER
-            setBackgroundColor(Color.rgb(18, 18, 24))
-            text = "Loading..."
+            text = "Loading…"
         }
-        setContentView(loadingText)
+        card.addView(loadingText)
+
+        root.addView(card, FrameLayout.LayoutParams(
+            dp(300), ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { gravity = Gravity.CENTER })
+        setContentView(root)
         ui.post(loadingPoll)
     }
 
@@ -292,19 +346,231 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
         }
     }
 
+    // ---- ready screen -------------------------------------------------------
+    // nativeLoad() has already parsed/streamed the MIDI at this point, but there
+    // is deliberately no SurfaceView yet. The engine cannot start until the user
+    // presses Play, so this is a real "ready" state rather than decorative copy.
+    private fun showReadyScreen(
+        midiName: String,
+        midiBytes: Long,
+        soundfontName: String?,
+        voiceCount: Int,
+        noteSpeed: Float
+    ) {
+        ui.removeCallbacks(loadingPoll)
+
+        val root = FrameLayout(this).apply {
+            background = GradientDrawable(
+                GradientDrawable.Orientation.TL_BR,
+                intArrayOf(Color.rgb(20, 16, 38), Color.rgb(7, 9, 15), Color.rgb(8, 24, 28))
+            )
+        }
+        val page = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(20), dp(20), dp(20))
+        }
+
+        page.addView(TextView(this).apply {
+            text = "aPFA"
+            setTextColor(Color.WHITE)
+            textSize = 27f
+            typeface = Typeface.DEFAULT_BOLD
+        })
+        page.addView(TextView(this).apply {
+            text = "Ready to play"
+            setTextColor(Color.rgb(188, 194, 212))
+            textSize = 13f
+        }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { bottomMargin = dp(18) })
+
+        val fileCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+            background = transportPanelBackground()
+            elevation = dp(8).toFloat()
+        }
+        val fileHeader = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        fileHeader.addView(TextView(this).apply {
+            text = midiName
+            setTextColor(Color.WHITE)
+            textSize = 18f
+            typeface = Typeface.DEFAULT_BOLD
+            maxLines = 2
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        val change = Button(this).apply {
+            text = "Change"
+            isAllCaps = false
+            setTextColor(Color.rgb(203, 208, 223))
+            textSize = 12f
+            background = null
+            setOnClickListener { finish() }
+        }
+        fileHeader.addView(change)
+        fileCard.addView(fileHeader)
+
+        val noteCount = nativeGetNoteCount()
+        val totalUs = nativeGetTotalMicros()
+        val memoryMb = nativeGetMemoryBytes() / 1048576.0
+        val streamedMb = nativeGetStreamedBytes() / 1048576.0
+
+        fileCard.addView(TextView(this).apply {
+            text = buildString {
+                append("%,d notes".format(noteCount))
+                append("   •   ")
+                append(formatDuration(totalUs))
+                if (midiBytes > 0) {
+                    append("   •   ")
+                    append(formatBytes(midiBytes))
+                }
+            }
+            setTextColor(Color.rgb(203, 208, 223))
+            textSize = 13f
+        }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = dp(10) })
+
+        fileCard.addView(TextView(this).apply {
+            text = if (streamedMb > 0)
+                "%.1f MB RAM   •   %.1f MB streamed".format(memoryMb, streamedMb)
+            else
+                "%.1f MB RAM".format(memoryMb)
+            setTextColor(Color.rgb(166, 174, 195))
+            textSize = 12f
+        }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = dp(5) })
+
+        page.addView(fileCard, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ))
+
+        // SoundFont is a compact setting here rather than a second primary action.
+        page.addView(TextView(this).apply {
+            text = "SoundFont"
+            setTextColor(Color.rgb(166, 174, 195))
+            textSize = 12f
+        }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = dp(18) })
+        page.addView(TextView(this).apply {
+            text = soundfontName ?: "No SoundFont"
+            setTextColor(Color.rgb(45, 212, 191))
+            textSize = 14f
+            typeface = Typeface.DEFAULT_BOLD
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = dp(4) })
+
+        val quick = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+            background = transportPanelBackground()
+        }
+        quick.addView(TextView(this).apply {
+            text = "Quick settings"
+            setTextColor(Color.WHITE)
+            textSize = 16f
+            typeface = Typeface.DEFAULT_BOLD
+        })
+        quick.addView(TextView(this).apply {
+            text = "Voice Count   $voiceCount"
+            setTextColor(Color.rgb(203, 208, 223))
+            textSize = 13f
+        }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = dp(12) })
+        quick.addView(TextView(this).apply {
+            text = "Note Speed   %.3f×".format(noteSpeed)
+            setTextColor(Color.rgb(203, 208, 223))
+            textSize = 13f
+        }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = dp(8) })
+        page.addView(quick, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = dp(18) })
+
+        root.addView(page, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { gravity = Gravity.TOP })
+
+        val play = Button(this).apply {
+            text = "Play"
+            isAllCaps = false
+            textSize = 17f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(Color.WHITE)
+            setOnClickListener { showPlaybackScreen() }
+        }
+        styleTransportButton(play)
+        root.addView(play, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(58)
+        ).apply {
+            gravity = Gravity.BOTTOM
+            setMargins(dp(20), 0, dp(20), dp(20))
+        })
+
+        setContentView(root)
+    }
+
+    private fun formatDuration(micros: Long): String {
+        val total = (micros.coerceAtLeast(0L) / 1_000_000L)
+        val h = total / 3600
+        val m = (total % 3600) / 60
+        val sec = total % 60
+        return if (h > 0) "%d:%02d:%02d".format(h, m, sec)
+               else "%d:%02d".format(m, sec)
+    }
+
+    private fun formatBytes(bytes: Long): String = when {
+        bytes >= 1024L * 1024L * 1024L -> "%.2f GB".format(bytes / 1073741824.0)
+        bytes >= 1024L * 1024L -> "%.1f MB".format(bytes / 1048576.0)
+        bytes >= 1024L -> "%.1f KB".format(bytes / 1024.0)
+        else -> "$bytes B"
+    }
+
+    private fun displaySize(uri: Uri): Long {
+        try {
+            contentResolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { c ->
+                if (c.moveToFirst()) {
+                    val idx = c.getColumnIndex(OpenableColumns.SIZE)
+                    if (idx >= 0 && !c.isNull(idx)) return c.getLong(idx)
+                }
+            }
+        } catch (_: Exception) {}
+        return -1L
+    }
+
     // ---- playback screen ----
 
     private fun showPlaybackScreen() {
         ui.removeCallbacks(loadingPoll)
-        val root = FrameLayout(this)
+        val root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
 
         val surface = SurfaceView(this)
         surface.holder.addCallback(this)
         root.addView(surface, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
 
-        // Hold (400 ms): pause/resume immediately when threshold is reached.
-        // Double-tap (two short taps < 300 ms apart): hide/show the action bar.
+        // Any touch reveals the transport immediately and restarts its idle timer.
+        // Holding for 400 ms keeps the existing PFA-style pause/resume gesture.
         val holdRunnable = Runnable {
             holdFired = true
             togglePause()
@@ -312,87 +578,139 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
         surface.setOnTouchListener { _, event ->
             when (event.actionMasked) {
                 android.view.MotionEvent.ACTION_DOWN -> {
+                    showTransportAndSchedule()
                     holdFired = false
                     ui.postDelayed(holdRunnable, 400L)
                 }
                 android.view.MotionEvent.ACTION_UP, android.view.MotionEvent.ACTION_CANCEL -> {
                     ui.removeCallbacks(holdRunnable)
-                    if (!holdFired) {
-                        // Short tap — check for double-tap
-                        val now = System.currentTimeMillis()
-                        if (now - lastTapTime < 300L) toggleUi()
-                        lastTapTime = now
-                    }
+                    if (!holdFired) showTransportAndSchedule()
                 }
             }
             true
         }
 
-        // Action bar: seek bar + pause button.
-        // Time and FPS are drawn by the GL renderer every frame — no TextView needed.
-        if (hasActionBar) actionBar?.let { ab ->
-            val bar = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-            }
-            val title = TextView(this).apply {
-                text = "aPFA"
-                setTextColor(Color.WHITE)
-                textSize = 18f
-                typeface = android.graphics.Typeface.DEFAULT_BOLD
-            }
-            bar.addView(title, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply { rightMargin = dp(16) })
-            seekBar = SeekBar(this).apply {
-                max = 1000
-                setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                    override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {}
-                    override fun onStartTrackingTouch(s: SeekBar?) { userSeeking = true }
-                    override fun onStopTrackingTouch(s: SeekBar?) {
-                        // Map the slider across [min, max] = PFA's
-                        // [GetMinTime, GetMaxTime], so the far left seeks into the
-                        // -3s pre-roll (shows "-00:03"), like stock PFA:
-                        // JumpTo(llFirstTime + (llLastTime-llFirstTime)*p/1000).
-                        val minU = nativeGetMinMicros()
-                        val maxU = nativeGetMaxMicros()
-                        if (maxU > minU)
-                            nativeSeek(minU + (maxU - minU) * (s?.progress ?: 0).toLong() / 1000L)
-                        userSeeking = false
-                    }
-                })
-            }
-            bar.addView(seekBar, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-            pauseButton = Button(this).apply {
-                text = "❚❚"
-                setOnClickListener { togglePause() }
-            }
-            bar.addView(pauseButton)
-            ab.setDisplayShowTitleEnabled(false)
-            ab.setDisplayShowCustomEnabled(true)
-            ab.setCustomView(bar, ActionBar.LayoutParams(
-                ActionBar.LayoutParams.MATCH_PARENT,
-                ActionBar.LayoutParams.MATCH_PARENT))
+        // Floating transport: one layout works in portrait and landscape and
+        // avoids tying playback controls to the old platform ActionBar.
+        val bar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(14), dp(8), dp(10), dp(8))
+            background = transportPanelBackground()
+            elevation = dp(10).toFloat()
         }
+        val brand = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        brand.addView(TextView(this).apply {
+            text = "aPFA"
+            setTextColor(Color.WHITE)
+            textSize = 17f
+            typeface = Typeface.DEFAULT_BOLD
+        })
+        brand.addView(TextView(this).apply {
+            text = "PLAYBACK"
+            setTextColor(Color.rgb(45, 212, 191))
+            textSize = 9f
+            typeface = Typeface.DEFAULT_BOLD
+            letterSpacing = 0.12f
+        })
+        bar.addView(brand, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { marginEnd = dp(12) })
+
+        seekBar = SeekBar(this).apply {
+            max = 1000
+            progressTintList = ColorStateList.valueOf(Color.rgb(45, 212, 191))
+            thumbTintList = ColorStateList.valueOf(Color.rgb(139, 92, 246))
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {}
+                override fun onStartTrackingTouch(s: SeekBar?) {
+                    userSeeking = true
+                    showTransportAndSchedule()
+                }
+                override fun onStopTrackingTouch(s: SeekBar?) {
+                    val minU = nativeGetMinMicros()
+                    val maxU = nativeGetMaxMicros()
+                    if (maxU > minU)
+                        nativeSeek(minU + (maxU - minU) *
+                            (s?.progress ?: 0).toLong() / 1000L)
+                    userSeeking = false
+                    showTransportAndSchedule()
+                }
+            })
+        }
+        bar.addView(seekBar, LinearLayout.LayoutParams(
+            0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f
+        ))
+
+        pauseButton = Button(this).apply {
+            text = "❚❚"
+            contentDescription = "Pause"
+            setOnClickListener { togglePause() }
+        }
+        styleTransportButton(pauseButton)
+        bar.addView(pauseButton, LinearLayout.LayoutParams(dp(48), dp(48)).apply {
+            marginStart = dp(8)
+        })
+
+        transportBar = bar
+        root.addView(bar, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply {
+            gravity = Gravity.TOP
+            setMargins(dp(14), dp(14), dp(14), 0)
+        })
+
+        // Rich live stats live in Android UI rather than being baked into the
+        // GL piano roll. They update at 4 Hz, independently of the engine frame loop.
+        statsPanel = TextView(this).apply {
+            setTextColor(Color.WHITE)
+            textSize = 12f
+            typeface = Typeface.MONOSPACE
+            setLineSpacing(0f, 1.16f)
+            setPadding(dp(12), dp(9), dp(12), dp(9))
+            maxWidth = dp(360)
+            text = "FPS --   NPS --   PEAK --\nACTIVE --   NOTES --\n0:00 / 0:00   •   0%"
+            background = GradientDrawable().apply {
+                cornerRadius = dp(14).toFloat()
+                setColor(Color.argb(205, 11, 14, 23))
+                setStroke(dp(1), Color.argb(80, 45, 212, 191))
+            }
+            elevation = dp(7).toFloat()
+            setOnTouchListener { _, event ->
+                if (event.actionMasked == android.view.MotionEvent.ACTION_DOWN)
+                    showTransportAndSchedule()
+                true
+            }
+        }
+        root.addView(statsPanel, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.END
+            setMargins(dp(14), dp(88), dp(14), 0)
+        })
 
         loadingOverlay = TextView(this).apply {
             setTextColor(Color.WHITE)
             textSize = 16f
             gravity = Gravity.CENTER
-            setBackgroundColor(Color.rgb(18, 18, 24))
-            text = "Starting...\n$infoLine"
+            setBackgroundColor(Color.argb(224, 7, 9, 15))
+            text = "Starting engine…\n\n$infoLine"
         }
         root.addView(loadingOverlay, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
 
         setContentView(root)
-        // Poll seek bar at ~display rate. This is only a UI control, not timing-critical.
         ui.post(seekPoll)
     }
 
-    // Seek bar poll — 16 ms matches display refresh. Only updates the seek bar
-    // thumb position; Time and FPS are rendered by GL, not here.
+    // Seek bar stays display-rate smooth; richer stats update at 4 Hz so formatting
+    // strings never becomes part of the native render/dispatch hot path.
     private val seekPoll = object : Runnable {
         override fun run() {
             if (stopped) return
@@ -401,10 +719,18 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
             val maxU = nativeGetMaxMicros()
             if (::seekBar.isInitialized && !userSeeking && maxU > minU)
                 seekBar.progress = (((t - minU) * 1000L) / (maxU - minU)).toInt()
+
+            val nowMs = System.currentTimeMillis()
+            if (::statsPanel.isInitialized && nowMs - lastStatsUpdateMs >= 250L) {
+                updateStatsPanel(t)
+                lastStatsUpdateMs = nowMs
+            }
+
             if (::loadingOverlay.isInitialized &&
                 loadingOverlay.visibility == View.VISIBLE) {
                 if (nativeIsPlaying()) {
                     loadingOverlay.visibility = View.GONE
+                    showTransportAndSchedule()
                 } else {
                     // Engine aborted during start-up (synth or GL init). Show why
                     // instead of an infinite "Starting…" and stop polling — the
@@ -444,12 +770,79 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
     override fun onPause()  { super.onPause();  nativePause() }
     override fun onResume() { super.onResume(); if (!paused) nativeResume() }
 
-    private fun toggleUi() {
-        if (!hasActionBar) return  // nothing to hide — already bare
-        uiHidden = !uiHidden
-        actionBar?.let { ab ->
-            if (uiHidden) ab.hide() else ab.show()
+    private fun hideTransportAnimated() {
+        if (!::transportBar.isInitialized || uiHidden || userSeeking) return
+        uiHidden = true
+        ui.removeCallbacks(hideChromeRunnable)
+        val travel = (if (transportBar.height > 0) transportBar.height else dp(72)) + dp(24)
+        transportBar.animate()
+            .cancel()
+        transportBar.animate()
+            .translationY(-travel.toFloat())
+            .alpha(0f)
+            .setDuration(220L)
+            .start()
+        if (::statsPanel.isInitialized) {
+            statsPanel.animate().cancel()
+            statsPanel.animate()
+                .translationY(-dp(74).toFloat())
+                .setDuration(220L)
+                .start()
         }
+    }
+
+    private fun showTransportAndSchedule() {
+        if (!::transportBar.isInitialized) return
+        ui.removeCallbacks(hideChromeRunnable)
+        uiHidden = false
+        transportBar.visibility = View.VISIBLE
+        transportBar.animate()
+            .cancel()
+        transportBar.animate()
+            .translationY(0f)
+            .alpha(1f)
+            .setDuration(180L)
+            .start()
+        if (::statsPanel.isInitialized) {
+            statsPanel.animate().cancel()
+            statsPanel.animate()
+                .translationY(0f)
+                .setDuration(180L)
+                .start()
+        }
+        ui.postDelayed(hideChromeRunnable, CHROME_HIDE_DELAY_MS)
+    }
+
+    private fun updateStatsPanel(timeUs: Long) {
+        if (!::statsPanel.isInitialized) return
+        val totalUs = nativeGetTotalMicros().coerceAtLeast(0L)
+        val fps = nativeGetFps()
+        val nps = nativeGetNps().coerceAtLeast(0f)
+        val peak = nativeGetPeakNps().coerceAtLeast(0f)
+        val active = nativeGetActiveNotes().coerceAtLeast(0)
+        val notes = nativeGetNoteCount().coerceAtLeast(0L)
+        val progress = if (totalUs > 0L)
+            ((timeUs.coerceIn(0L, totalUs) * 100L) / totalUs).toInt()
+        else 0
+
+        statsPanel.text =
+            "FPS %4.1f   NPS %,d   PEAK %,d\nACTIVE %,d   NOTES %,d\n%s / %s   •   %d%%".format(
+                fps, nps.toLong(), peak.toLong(), active, notes,
+                formatPlaybackTime(timeUs), formatPlaybackTime(totalUs), progress
+            )
+    }
+
+    private fun formatPlaybackTime(micros: Long): String {
+        val negative = micros < 0L
+        val totalSeconds = kotlin.math.abs(micros) / 1_000_000L
+        val hours = totalSeconds / 3600L
+        val minutes = (totalSeconds % 3600L) / 60L
+        val seconds = totalSeconds % 60L
+        val value = if (hours > 0)
+            "%d:%02d:%02d".format(hours, minutes, seconds)
+        else
+            "%d:%02d".format(minutes, seconds)
+        return if (negative) "-$value" else value
     }
 
     private fun togglePause() {
@@ -457,6 +850,33 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
         if (paused) nativePause() else nativeResume()
         if (::pauseButton.isInitialized)
             pauseButton.text = if (paused) "▶" else "❚❚"
+        showTransportAndSchedule()
+    }
+
+    private fun transportPanelBackground(): GradientDrawable =
+        GradientDrawable().apply {
+            cornerRadius = dp(18).toFloat()
+            setColor(Color.argb(226, 18, 21, 32))
+            setStroke(dp(1), Color.argb(105, 139, 92, 246))
+        }
+
+    private fun styleTransportButton(button: Button) {
+        val shape = GradientDrawable().apply {
+            cornerRadius = dp(14).toFloat()
+            setColor(Color.rgb(139, 92, 246))
+        }
+        button.isAllCaps = false
+        button.setTextColor(Color.WHITE)
+        button.textSize = 15f
+        button.typeface = Typeface.DEFAULT_BOLD
+        button.background = RippleDrawable(
+            ColorStateList.valueOf(Color.argb(64, 255, 255, 255)),
+            shape,
+            null
+        )
+        button.stateListAnimator = null
+        button.elevation = dp(4).toFloat()
+        button.setPadding(0, 0, 0, 0)
     }
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
@@ -510,9 +930,8 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
     //
     // Two routes, best first:
     //   1. Hand BASSMIDI the file where it already lives. Costs nothing and the
-    //      samples resolve themselves. Covers the pre-SAF browser's file:// URIs
-    //      and any content:// URI still readable as a path (i.e. below API 29,
-    //      before scoped storage).
+    //      samples resolve themselves. Covers providers whose document URI can
+    //      still be resolved to a readable filesystem path (typically API 23-28).
     //   2. Rebuild the instrument in the cache: copy the .sfz, parse it, and
     //      pull every file it names through the same provider, preserving the
     //      relative layout so the paths inside the .sfz stay correct.
@@ -536,10 +955,9 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
     /**
      * The real filesystem path behind a picked URI, or null.
      *
-     * Deliberately does NOT use DocumentsContract: that class is API 19+ and
-     * this app's floor is API 10, where merely naming a missing class inside a
-     * method body can upset Dalvik's verifier. Everything here is Uri string
-     * work, which is API 1.
+     * This stays as provider-agnostic Uri string work because several OEM
+     * document providers use the same document-id shape without behaving
+     * exactly like ExternalStorageProvider.
      */
     private fun resolveLocalPath(uri: Uri): String? {
         if ("file".equals(uri.scheme, ignoreCase = true)) return uri.path

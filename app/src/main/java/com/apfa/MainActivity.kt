@@ -5,13 +5,17 @@ import android.app.Activity
 import android.app.AlertDialog
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.res.ColorStateList
+import android.content.res.Configuration
 import android.os.Build
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.RippleDrawable
 import android.net.Uri
 import android.os.Bundle
-import android.os.Environment
 import android.provider.OpenableColumns
 import android.text.Editable
 import android.text.InputType
@@ -20,15 +24,12 @@ import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
-import android.widget.AdapterView
-import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
-import android.widget.ListView
 import android.widget.RadioButton
 import android.widget.RadioGroup
 import android.widget.ScrollView
@@ -43,9 +44,9 @@ import java.io.FileOutputStream
 /**
  * aPFA setup screen.
  *
- * Pure UI shell — picks the MIDI + soundfont and captures the Voice Count and
- * Note Speed settings. Settings and the chosen soundfont persist across
- * launches via SharedPreferences. The native engine (libapfa.so) does the work.
+ * Pure UI shell — responsive in portrait and landscape. It picks the MIDI +
+ * soundfont and captures playback settings; the native engine (libapfa.so)
+ * remains completely separate from the presentation layer.
  */
 class MainActivity : Activity() {
 
@@ -63,17 +64,12 @@ class MainActivity : Activity() {
         private const val REQ_IMPORT_PROFILE = 5
         private const val REQ_STORAGE_PERM = 100
 
-        // Setup-screen geometry. The SF button (mid-left) and the settings panel
-        // (bottom-right) share the same band of screen, so the SF label's width
-        // budget is derived from these — keep buildSetupScreen() and
-        // sfButtonLabel() reading the same numbers.
+        // Responsive shell spacing. The UI is rebuilt on orientation changes,
+        // while the playback engine itself stays alive.
         private const val EDGE_MARGIN_DP = 20
-        private const val PANEL_WIDTH_DP = 280
-        // Breathing room left between the SF text and the panel's left edge.
-        private const val SF_GAP_DP = 16
+        private const val CARD_GAP_DP = 18
 
         private const val SF_PREFIX = "SF: "
-        private const val SF_ELLIPSIS = "..."
 
         // Pagefile Location radio ids. RadioGroup.check() needs real ids and
         // View.generateViewId() is API 17+, so they're fixed — they only have to
@@ -99,9 +95,7 @@ class MainActivity : Activity() {
     // ships both ABIs, so a 64-bit device runs a 64-bit process and the device
     // capability is a faithful proxy; anything before API 21 is 32-bit outright.
     private val is32BitProcess: Boolean
-        get() = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP)
-                    Build.SUPPORTED_64_BIT_ABIS.isEmpty()
-                else true
+        get() = !android.os.Process.is64Bit()
 
     // "Chunked Disk Streaming" (Advanced Settings): allow the chunked on-disk
     // pagefile sort for MIDIs whose load transient exceeds RAM (~80M+ notes).
@@ -125,10 +119,21 @@ class MainActivity : Activity() {
     private lateinit var midiButton: Button
     private lateinit var soundfontButton: Button
 
+    private data class RecentMidi(val uri: Uri, val name: String)
+
+    // Shell-only palette. None of this touches native rendering or PFA timing.
+    private val uiBg       = Color.rgb(9, 11, 18)
+    private val uiPanel    = Color.argb(224, 18, 21, 32)
+    private val uiPanelAlt = Color.argb(214, 24, 28, 42)
+    private val uiAccent   = Color.rgb(139, 92, 246)
+    private val uiAccent2  = Color.rgb(45, 212, 191)
+    private val uiMuted    = Color.rgb(174, 180, 196)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        window.navigationBarColor = uiBg
         loadSettings()
         setContentView(buildSetupScreen())
         ensureStoragePermission()
@@ -137,12 +142,19 @@ class MainActivity : Activity() {
         Thread { SdCard.sweep(this) }.start()
     }
 
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        // MainActivity handles rotation itself so the setup shell can swap
+        // between its portrait stack and landscape two-column layout.
+        setContentView(buildSetupScreen())
+    }
+
     // Old devices (and some OEM pickers, e.g. Huawei EMUI) return file:// URIs from
     // the document picker. Opening those reads the raw /storage path, which needs
     // READ_EXTERNAL_STORAGE. Modern phones (API 33+) always get content:// — no
     // permission needed, and the permission no longer exists — so we only ask on 23..32.
     private fun ensureStoragePermission() {
-        if (Build.VERSION.SDK_INT in 23..32) {
+        if (Build.VERSION.SDK_INT <= 32) {
             val perm = Manifest.permission.READ_EXTERNAL_STORAGE
             if (checkSelfPermission(perm) != PackageManager.PERMISSION_GRANTED) {
                 requestPermissions(arrayOf(perm), REQ_STORAGE_PERM)
@@ -153,139 +165,465 @@ class MainActivity : Activity() {
     private fun buildSetupScreen(): View {
         val mp = ViewGroup.LayoutParams.MATCH_PARENT
         val wc = ViewGroup.LayoutParams.WRAP_CONTENT
-        val root = FrameLayout(this)
+        val portrait = resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT
 
-        // --- background (apfa-wp.jpg from assets; dark fallback if absent) ---
-        val bg = ImageView(this)
-        bg.scaleType = ImageView.ScaleType.CENTER_CROP
-        bg.layoutParams = FrameLayout.LayoutParams(mp, mp)
-        val bgBitmap = loadAsset("apfa-wp.jpg")
-        if (bgBitmap != null) bg.setImageBitmap(bgBitmap)
-        else bg.setBackgroundColor(Color.rgb(18, 18, 24))
-        root.addView(bg)
+        val root = FrameLayout(this).apply { setBackgroundColor(uiBg) }
+        val bg = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            alpha = 0.58f
+        }
+        loadAsset("apfa-wp.jpg")?.let { bg.setImageBitmap(it) } ?: bg.setBackgroundColor(uiBg)
+        root.addView(bg, FrameLayout.LayoutParams(mp, mp))
+        root.addView(View(this).apply {
+            background = GradientDrawable(
+                GradientDrawable.Orientation.TOP_BOTTOM,
+                intArrayOf(
+                    Color.argb(200, 5, 7, 14),
+                    Color.argb(88, 8, 10, 18),
+                    Color.argb(228, 5, 7, 14)
+                )
+            )
+        }, FrameLayout.LayoutParams(mp, mp))
 
-        // --- top-left: logo + version ---
-        val topLeft = LinearLayout(this)
-        topLeft.orientation = LinearLayout.HORIZONTAL
-        topLeft.gravity = Gravity.CENTER_VERTICAL
-        topLeft.layoutParams = FrameLayout.LayoutParams(wc, wc).apply {
-            gravity = Gravity.TOP or Gravity.START
-            setMargins(dp(20), dp(20), 0, 0)
+        val scroll = ScrollView(this).apply {
+            isFillViewport = true
+            overScrollMode = View.OVER_SCROLL_NEVER
+        }
+        val page = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(if (portrait) 16 else 28), dp(16), dp(if (portrait) 16 else 28), dp(28))
+        }
+
+        // Compact header: brand, version, one settings entry.
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
         }
         loadAsset("aPFAlogo.png")?.let { logo ->
-            val iv = ImageView(this)
-            iv.setImageBitmap(logo)
-            iv.layoutParams = LinearLayout.LayoutParams(dp(48), dp(48))
-            topLeft.addView(iv)
+            header.addView(ImageView(this).apply {
+                setImageBitmap(logo)
+                scaleType = ImageView.ScaleType.FIT_CENTER
+            }, LinearLayout.LayoutParams(dp(48), dp(48)))
         }
-        val version = TextView(this)
-        // ES2/ES3 are now one build (renderer chosen by the Legacy toggle), so the
-        // old "-ES2" fork suffix is gone.
-        version.text = "aPFA v" + appVersion()
-        version.setTextColor(Color.WHITE)
-        version.textSize = 20f
-        version.setShadowLayer(4f, 0f, 2f, Color.BLACK)
-        version.setPadding(dp(12), 0, 0, 0)
-        topLeft.addView(version)
-        root.addView(topLeft)
-
-        // --- bottom-left: byline ---
-        val byline = TextView(this)
-        byline.text = "By Starzainia and HexagonMIDIs!"
-        byline.setTextColor(Color.WHITE)
-        byline.textSize = 16f
-        byline.setShadowLayer(4f, 0f, 2f, Color.BLACK)
-        root.addView(byline, FrameLayout.LayoutParams(wc, wc).apply {
-            gravity = Gravity.BOTTOM or Gravity.START
-            setMargins(dp(20), 0, 0, dp(20))
+        header.addView(TextView(this).apply {
+            text = "aPFA"
+            setTextColor(Color.WHITE)
+            textSize = 24f
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(dp(12), 0, dp(8), 0)
         })
-
-        // --- top-right: Core Affinity gear ---
+        header.addView(TextView(this).apply {
+            text = "v${appVersion()}"
+            setTextColor(uiMuted)
+            textSize = 12f
+        }, LinearLayout.LayoutParams(0, wc, 1f))
         val gear = Button(this).apply {
             text = "⚙"
-            textSize = 22f
-            contentDescription = "Core Affinity"
-            setOnClickListener { showCoreAffinityDialog() }
+            contentDescription = "Settings"
+            textSize = 20f
+            setOnClickListener { showSettingsDialog() }
         }
-        root.addView(gear, FrameLayout.LayoutParams(wc, wc).apply {
-            gravity = Gravity.TOP or Gravity.END
-            setMargins(0, dp(20), dp(20), 0)
+        styleShellButton(gear, primary = false, compact = true)
+        header.addView(gear, LinearLayout.LayoutParams(dp(48), dp(48)))
+        page.addView(header, LinearLayout.LayoutParams(mp, wc).apply { bottomMargin = dp(20) })
+
+        // Primary action in the lower, easy-to-reach half of the first card.
+        val openCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+            background = shellCardBackground(accented = true)
+            elevation = dp(7).toFloat()
+        }
+        openCard.addView(TextView(this).apply {
+            text = "MIDI"
+            setTextColor(uiMuted)
+            textSize = 12f
+            typeface = Typeface.DEFAULT_BOLD
         })
-
-        // --- mid-left: actions ---
-        val midLeft = LinearLayout(this)
-        midLeft.orientation = LinearLayout.VERTICAL
-        midLeft.layoutParams = FrameLayout.LayoutParams(wc, wc).apply {
-            gravity = Gravity.START or Gravity.CENTER_VERTICAL
-            setMargins(dp(EDGE_MARGIN_DP), 0, 0, 0)
+        openCard.addView(TextView(this).apply {
+            text = "Choose a file to load"
+            setTextColor(Color.WHITE)
+            textSize = 18f
+            typeface = Typeface.DEFAULT_BOLD
+        }, LinearLayout.LayoutParams(mp, wc).apply { topMargin = dp(4) })
+        midiButton = Button(this).apply {
+            text = "Open MIDI"
+            setOnClickListener { pickFile(REQ_MIDI) }
         }
-        midiButton = Button(this)
-        midiButton.text = "Play MIDI"
-        midiButton.setOnClickListener { pickFile(REQ_MIDI) }
-        midLeft.addView(midiButton)
+        styleShellButton(midiButton, primary = true)
+        openCard.addView(midiButton, LinearLayout.LayoutParams(mp, dp(56)).apply { topMargin = dp(18) })
+        page.addView(openCard, LinearLayout.LayoutParams(mp, wc))
 
-        soundfontButton = Button(this)
-        soundfontButton.text = soundfontUri?.let { sfButtonLabel(it) } ?: "Load Soundfont"
-        soundfontButton.setOnClickListener { pickFile(REQ_SOUNDFONT) }
-        midLeft.addView(soundfontButton, LinearLayout.LayoutParams(wc, wc).apply {
-            topMargin = dp(12)
-        })
-        root.addView(midLeft)
-
-        // --- bottom-right: settings ---
-        val panel = LinearLayout(this)
-        panel.orientation = LinearLayout.VERTICAL
-        panel.setBackgroundColor(Color.argb(140, 0, 0, 0))
-        panel.setPadding(dp(16), dp(12), dp(16), dp(12))
-        panel.layoutParams = FrameLayout.LayoutParams(dp(PANEL_WIDTH_DP), wc).apply {
-            gravity = Gravity.END or Gravity.BOTTOM
-            setMargins(0, 0, dp(EDGE_MARGIN_DP), dp(EDGE_MARGIN_DP))
+        // Recent files use the persisted SAF URI grants; no duplicate metadata scan.
+        val recents = loadRecentMidis()
+        if (recents.isNotEmpty()) {
+            page.addView(sectionTitle("Recent files"), LinearLayout.LayoutParams(mp, wc).apply {
+                topMargin = dp(22)
+                bottomMargin = dp(8)
+            })
+            val recentCard = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(8), dp(8), dp(8), dp(8))
+                background = shellCardBackground(accented = false)
+            }
+            recents.forEachIndexed { index, item ->
+                val row = TextView(this).apply {
+                    text = item.name
+                    setTextColor(Color.rgb(215, 220, 232))
+                    textSize = 14f
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(dp(12), dp(12), dp(12), dp(12))
+                    maxLines = 1
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                    setOnClickListener {
+                        midiUri = item.uri
+                        launchPlayback()
+                    }
+                }
+                recentCard.addView(row, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(48)))
+                if (index != recents.lastIndex) recentCard.addView(View(this).apply {
+                    setBackgroundColor(Color.argb(38, 255, 255, 255))
+                }, LinearLayout.LayoutParams(mp, dp(1)))
+            }
+            page.addView(recentCard)
         }
 
-        // --- Background Color button (above Voice slider) ---
-        val colorButton = Button(this)
-        colorButton.text = "Background"
-        colorButton.setOnClickListener { showBgColorDialog() }
-        panel.addView(colorButton, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+        // Compact SoundFont chip row.
+        page.addView(sectionTitle("SoundFont"), LinearLayout.LayoutParams(mp, wc).apply {
+            topMargin = dp(22)
             bottomMargin = dp(8)
         })
+        val sfRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(14), dp(8), dp(10), dp(8))
+            background = shellCardBackground(accented = false)
+            setOnClickListener { pickFile(REQ_SOUNDFONT) }
+        }
+        sfRow.addView(TextView(this).apply {
+            text = "SF"
+            setTextColor(uiAccent2)
+            textSize = 12f
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+        }, LinearLayout.LayoutParams(dp(36), dp(36)))
+        soundfontButton = Button(this).apply {
+            text = soundfontUri?.let { displayName(it) } ?: "No SoundFont"
+            isAllCaps = false
+            gravity = Gravity.START or Gravity.CENTER_VERTICAL
+            setTextColor(Color.WHITE)
+            textSize = 14f
+            background = null
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            setOnClickListener { pickFile(REQ_SOUNDFONT) }
+        }
+        sfRow.addView(soundfontButton, LinearLayout.LayoutParams(0, dp(48), 1f))
+        sfRow.addView(TextView(this).apply {
+            text = "›"
+            setTextColor(uiMuted)
+            textSize = 24f
+            gravity = Gravity.CENTER
+        }, LinearLayout.LayoutParams(dp(28), dp(48)))
+        page.addView(sfRow)
 
-        val voiceLabel = label("Voice Count: $voiceCount")
-        panel.addView(voiceLabel)
-        val voiceBar = SeekBar(this)
-        voiceBar.max = 500
-        voiceBar.progress = voiceCount
-        voiceBar.setOnSeekBarChangeListener(simpleListener { p ->
-            voiceCount = p.coerceAtLeast(1)
-            voiceLabel.text = "Voice Count: $voiceCount"
+        // Quick settings: exact value is tappable; slider retains fast tuning.
+        page.addView(sectionTitle("Quick settings"), LinearLayout.LayoutParams(mp, wc).apply {
+            topMargin = dp(22)
+            bottomMargin = dp(8)
         })
-        panel.addView(voiceBar)
+        val quick = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+            background = shellCardBackground(accented = false)
+        }
 
-        val speedLabel = label("Note Speed: %.3f".format(noteSpeed))
-        speedLabel.layoutParams = LinearLayout.LayoutParams(wc, wc).apply { topMargin = dp(10) }
-        panel.addView(speedLabel)
-        val speedBar = SeekBar(this)
-        speedBar.max = 1000                                  // non-linear, 0.05 at the midpoint
-        speedBar.progress = progressFromSpeed(noteSpeed)
-        speedBar.setOnSeekBarChangeListener(simpleListener { p ->
-            noteSpeed = speedFromProgress(p)
-            speedLabel.text = "Note Speed: %.3f".format(noteSpeed)
+        addVoiceControl(quick)
+        quick.addView(View(this).apply {
+            setBackgroundColor(Color.argb(36,255,255,255))
+        }, LinearLayout.LayoutParams(mp, dp(1)).apply { topMargin = dp(12); bottomMargin = dp(12) })
+        addSpeedControl(quick)
+
+        val bgRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(12), 0, 0)
+            setOnClickListener { showBgColorDialog() }
+        }
+        val swatchColor = Color.rgb(bgColor and 0xFF, (bgColor shr 8) and 0xFF, (bgColor shr 16) and 0xFF)
+        bgRow.addView(View(this).apply {
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(if (bgImagePath == null) swatchColor else Color.DKGRAY)
+                setStroke(dp(1), Color.argb(100,255,255,255))
+            }
+        }, LinearLayout.LayoutParams(dp(32), dp(32)).apply { marginEnd = dp(12) })
+        val bgText = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        bgText.addView(TextView(this).apply {
+            text = "Background"
+            setTextColor(Color.WHITE)
+            textSize = 14f
+            typeface = Typeface.DEFAULT_BOLD
         })
-        panel.addView(speedBar)
-
-        // --- Advanced Settings (Legacy Renderer + Chunked Disk Streaming) ---
-        val advancedButton = Button(this)
-        advancedButton.text = "Advanced Settings"
-        advancedButton.setOnClickListener { showAdvancedSettingsDialog() }
-        panel.addView(advancedButton, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-            topMargin = dp(10)
+        bgText.addView(TextView(this).apply {
+            text = if (bgImagePath != null) "Image" else "Solid colour"
+            setTextColor(uiMuted)
+            textSize = 12f
         })
+        bgRow.addView(bgText, LinearLayout.LayoutParams(0, wc, 1f))
+        bgRow.addView(TextView(this).apply {
+            text = "›"
+            setTextColor(uiMuted)
+            textSize = 24f
+        })
+        quick.addView(bgRow, LinearLayout.LayoutParams(mp, wc))
+        page.addView(quick)
 
-        root.addView(panel)
-
+        scroll.addView(page, FrameLayout.LayoutParams(mp, wc))
+        root.addView(scroll, FrameLayout.LayoutParams(mp, mp))
         return root
+    }
+
+    private fun addVoiceControl(parent: LinearLayout) {
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        header.addView(TextView(this).apply {
+            text = "Voice Count"
+            setTextColor(Color.WHITE)
+            textSize = 14f
+            typeface = Typeface.DEFAULT_BOLD
+        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        val value = TextView(this).apply {
+            text = voiceCount.toString()
+            setTextColor(uiAccent2)
+            textSize = 14f
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(dp(12), dp(8), dp(12), dp(8))
+            setOnClickListener { showVoiceInput() }
+        }
+        header.addView(value)
+        parent.addView(header)
+        val bar = SeekBar(this).apply {
+            max = 499
+            progress = (voiceCount - 1).coerceIn(0, 499)
+            minHeight = dp(48)
+            styleShellSeekBar(this)
+            setOnSeekBarChangeListener(simpleListener { p ->
+                voiceCount = p + 1
+                value.text = voiceCount.toString()
+            })
+        }
+        parent.addView(bar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(48)))
+        parent.addView(rangeLabels("1", "500"))
+    }
+
+    private fun addSpeedControl(parent: LinearLayout) {
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        header.addView(TextView(this).apply {
+            text = "Note Speed"
+            setTextColor(Color.WHITE)
+            textSize = 14f
+            typeface = Typeface.DEFAULT_BOLD
+        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        val value = TextView(this).apply {
+            text = "%.3f×".format(noteSpeed)
+            setTextColor(uiAccent2)
+            textSize = 14f
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(dp(12), dp(8), dp(12), dp(8))
+            setOnClickListener { showSpeedInput() }
+        }
+        header.addView(value)
+        parent.addView(header)
+        val bar = SeekBar(this).apply {
+            max = 1000
+            progress = progressFromSpeed(noteSpeed)
+            minHeight = dp(48)
+            styleShellSeekBar(this)
+            setOnSeekBarChangeListener(simpleListener { p ->
+                noteSpeed = speedFromProgress(p)
+                value.text = "%.3f×".format(noteSpeed)
+            })
+        }
+        parent.addView(bar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(48)))
+        parent.addView(rangeLabels("0.005×", "1.000×"))
+    }
+
+    private fun rangeLabels(min: String, max: String): LinearLayout =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(TextView(this@MainActivity).apply {
+                text = min; setTextColor(uiMuted); textSize = 11f
+            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            addView(TextView(this@MainActivity).apply {
+                text = max; setTextColor(uiMuted); textSize = 11f; gravity = Gravity.END
+            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        }
+
+    private fun showVoiceInput() {
+        val input = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_NUMBER
+            setText(voiceCount.toString())
+            setSelectAllOnFocus(true)
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Voice Count")
+            .setMessage("1–500  •  default 250")
+            .setView(input)
+            .setPositiveButton("Apply") { _, _ ->
+                voiceCount = (input.text.toString().toIntOrNull() ?: voiceCount).coerceIn(1, 500)
+                saveSettings()
+                setContentView(buildSetupScreen())
+            }
+            .setNeutralButton("Reset") { _, _ ->
+                voiceCount = 250
+                saveSettings()
+                setContentView(buildSetupScreen())
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun showSpeedInput() {
+        val input = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
+            setText("%.3f".format(noteSpeed))
+            setSelectAllOnFocus(true)
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Note Speed")
+            .setMessage("0.005×–1.000×  •  default 0.050×")
+            .setView(input)
+            .setPositiveButton("Apply") { _, _ ->
+                noteSpeed = (input.text.toString().toFloatOrNull() ?: noteSpeed).coerceIn(0.005f, 1.0f)
+                saveSettings()
+                setContentView(buildSetupScreen())
+            }
+            .setNeutralButton("Reset") { _, _ ->
+                noteSpeed = 0.05f
+                saveSettings()
+                setContentView(buildSetupScreen())
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun shellCardBackground(accented: Boolean): GradientDrawable =
+        GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = dp(22).toFloat()
+            setColor(if (accented) uiPanelAlt else uiPanel)
+            setStroke(dp(1), if (accented) Color.argb(155, 139, 92, 246)
+                              else Color.argb(72, 255, 255, 255))
+        }
+
+    private fun shellButtonBackground(primary: Boolean): RippleDrawable {
+        val shape = GradientDrawable().apply {
+            cornerRadius = dp(15).toFloat()
+            setColor(if (primary) uiAccent else Color.argb(185, 35, 39, 55))
+            if (!primary) setStroke(dp(1), Color.argb(82, 255, 255, 255))
+        }
+        return RippleDrawable(
+            ColorStateList.valueOf(Color.argb(56, 255, 255, 255)),
+            shape,
+            null
+        )
+    }
+
+    private fun styleShellButton(button: Button, primary: Boolean, compact: Boolean = false) {
+        button.isAllCaps = false
+        button.setTextColor(Color.WHITE)
+        button.textSize = if (compact) 18f else 14.5f
+        button.typeface = Typeface.DEFAULT_BOLD
+        button.letterSpacing = 0.015f
+        button.background = shellButtonBackground(primary)
+        button.stateListAnimator = null
+        button.elevation = if (primary) dp(5).toFloat() else dp(2).toFloat()
+        if (!compact) button.setPadding(dp(16), 0, dp(16), 0)
+    }
+
+    private fun styleShellSeekBar(bar: SeekBar) {
+        val accent = ColorStateList.valueOf(uiAccent2)
+        bar.progressTintList = accent
+        bar.thumbTintList = accent
+    }
+
+    private fun sectionTitle(text: String): TextView = TextView(this).apply {
+        this.text = text
+        setTextColor(Color.WHITE)
+        textSize = 19f
+        typeface = Typeface.DEFAULT_BOLD
+    }
+
+    private fun settingText(name: String, value: String): String = "$name    $value"
+
+    private fun settingLabel(name: String, value: String): TextView = TextView(this).apply {
+        text = settingText(name, value)
+        setTextColor(Color.WHITE)
+        textSize = 14f
+        typeface = Typeface.DEFAULT_BOLD
+    }
+
+    private fun showSettingsDialog() {
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(8), dp(16), dp(8))
+        }
+        fun group(title: String) {
+            root.addView(TextView(this).apply {
+                text = title.uppercase()
+                setTextColor(uiAccent2)
+                textSize = 11f
+                typeface = Typeface.DEFAULT_BOLD
+                letterSpacing = 0.12f
+            }, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(12); bottomMargin = dp(4) })
+        }
+        fun action(title: String, subtitle: String, click: () -> Unit) {
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(12), dp(10), dp(12), dp(10))
+                setOnClickListener { click() }
+            }
+            row.addView(TextView(this).apply {
+                text = title; setTextColor(Color.WHITE); textSize = 14f
+                typeface = Typeface.DEFAULT_BOLD
+            })
+            row.addView(TextView(this).apply {
+                text = subtitle; setTextColor(uiMuted); textSize = 12f
+            })
+            root.addView(row)
+        }
+
+        group("Performance")
+        action("Core affinity", if (cpuMask == 0L) "Auto" else "Custom mask") {
+            showCoreAffinityDialog()
+        }
+        action("Compatibility & streaming", "Legacy renderer, chunked streaming, pagefile location") {
+            showAdvancedSettingsDialog()
+        }
+
+        group("About")
+        action("aPFA v${appVersion()}", "Starzainia × HexagonMIDIs") {
+            AlertDialog.Builder(this)
+                .setTitle("About aPFA")
+                .setMessage("aPFA v${appVersion()}\n\nStarzainia × HexagonMIDIs\n\nA PFA-faithful Android MIDI player.")
+                .setPositiveButton("OK", null)
+                .show()
+        }
+
+        AlertDialog.Builder(this)
+            .setTitle("Settings")
+            .setView(ScrollView(this).apply { addView(root) })
+            .setPositiveButton("Done", null)
+            .show()
     }
 
     // --- Advanced Settings dialog ---------------------------------------------
@@ -737,11 +1075,6 @@ class MainActivity : Activity() {
     }
 
     private fun showExportProfileDialog() {
-        if (Build.VERSION.SDK_INT < 19) {
-            // ACTION_CREATE_DOCUMENT is SAF; profiles still import via the browser.
-            toast("Export requires Android 4.4+")
-            return
-        }
         val arr = loadProfiles()
         if (arr.length() == 0) { toast("No saved profiles to export"); return }
         val names = Array(arr.length()) { arr.getJSONObject(it).optString("name") }
@@ -758,6 +1091,38 @@ class MainActivity : Activity() {
             }
             .setNegativeButton("Cancel", null)
             .show()
+    }
+
+    private fun rememberRecentMidi(uri: Uri) {
+        val arr = JSONArray()
+        arr.put(JSONObject().apply {
+            put("uri", uri.toString())
+            put("name", displayName(uri))
+        })
+        loadRecentMidis().filter { it.uri != uri }.take(4).forEach {
+            arr.put(JSONObject().apply {
+                put("uri", it.uri.toString())
+                put("name", it.name)
+            })
+        }
+        getPreferences(MODE_PRIVATE).edit().putString("recentMidis", arr.toString()).apply()
+    }
+
+    private fun loadRecentMidis(): List<RecentMidi> {
+        val raw = getPreferences(MODE_PRIVATE).getString("recentMidis", "[]") ?: "[]"
+        return try {
+            val arr = JSONArray(raw)
+            buildList {
+                for (i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    val uri = o.optString("uri")
+                    val name = o.optString("name")
+                    if (uri.isNotEmpty() && name.isNotEmpty()) add(RecentMidi(Uri.parse(uri), name))
+                }
+            }
+        } catch (_: Exception) {
+            emptyList()
+        }
     }
 
     // --- settings persistence ---
@@ -818,82 +1183,14 @@ class MainActivity : Activity() {
 
     private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
 
-    // SAF (ACTION_OPEN_DOCUMENT) exists from API 19; before that there is no
-    // system picker (and usually no file-manager app), so fall back to the
-    // built-in browser. Both paths funnel into handlePicked().
+    // API 23+ always has the Storage Access Framework, so every picker goes
+    // through one modern path. This replaces the old pre-KitKat file browser.
     private fun pickFile(requestCode: Int, mime: String = "*/*") {
-        if (Build.VERSION.SDK_INT >= 19) {
-            pickTyped(requestCode, mime)
-        } else {
-            val extensions = when (requestCode) {
-                REQ_MIDI           -> arrayOf("mid", "midi")
-                REQ_SOUNDFONT      -> arrayOf("sf2", "sf3", "sfz")
-                REQ_BG_IMAGE       -> arrayOf("png", "jpg", "jpeg")
-                REQ_IMPORT_PROFILE -> arrayOf("json")
-                else -> emptyArray()
-            }
-            showFileBrowser(requestCode, extensions)
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = mime
         }
-    }
-
-    private fun pickTyped(requestCode: Int, mime: String) {
-        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT)
-        intent.addCategory(Intent.CATEGORY_OPENABLE)
-        intent.type = mime
         startActivityForResult(intent, requestCode)
-    }
-
-    // --- Built-in file browser (for API < 19) ---
-    // A simple AlertDialog list starting from /sdcard. Folders navigate, files
-    // select (as a file:// URI — contentResolver reads those on every API
-    // level, so handlePicked() is shared with the SAF path). ".." goes up.
-
-    private var fileBrowserRequestCode = 0
-    private var fileBrowserExtensions: Array<String> = emptyArray()
-
-    private fun showFileBrowser(requestCode: Int, extensions: Array<String>) {
-        fileBrowserRequestCode = requestCode
-        fileBrowserExtensions = extensions
-        showFileBrowserDialog(Environment.getExternalStorageDirectory().absolutePath)
-    }
-
-    private fun showFileBrowserDialog(dirPath: String) {
-        val dir = File(dirPath)
-        val entries = dir.listFiles() ?: arrayOf<File>()
-        val folders = entries.filter { it.isDirectory && !it.name.startsWith(".") }
-            .sortedBy { it.name }
-        val files = entries.filter { it.isFile && !it.name.startsWith(".") }
-            .sortedBy { it.name }
-            .filter { f ->
-                val ext = f.name.substringAfterLast('.', "").lowercase()
-                fileBrowserExtensions.isEmpty() || fileBrowserExtensions.any { ext == it }
-            }
-
-        val items = ArrayList<String>()
-        val itemFiles = ArrayList<File>()
-        dir.parent?.let { items.add("[..]"); itemFiles.add(File(it)) }
-        for (f in folders) { items.add("[" + f.name + "]"); itemFiles.add(f) }
-        for (f in files)   { items.add(f.name);             itemFiles.add(f) }
-        if (items.isEmpty()) { items.add("(empty)"); itemFiles.add(dir) }
-
-        val listView = ListView(this)
-        listView.adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, items)
-
-        val dialog = AlertDialog.Builder(this)
-            .setTitle(dir.absolutePath)
-            .setView(listView)
-            .setNegativeButton("Cancel", null)
-            .show()
-
-        listView.onItemClickListener = AdapterView.OnItemClickListener { _, _, position, _ ->
-            val selected = itemFiles[position]
-            dialog.dismiss()
-            if (selected.isDirectory) {
-                showFileBrowserDialog(selected.absolutePath)
-            } else {
-                handlePicked(fileBrowserRequestCode, Uri.fromFile(selected))
-            }
-        }
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
@@ -913,6 +1210,7 @@ class MainActivity : Activity() {
                 }
                 persist(uri)
                 midiUri = uri
+                rememberRecentMidi(uri)
                 launchPlayback()
             }
             REQ_SOUNDFONT -> {
@@ -924,7 +1222,7 @@ class MainActivity : Activity() {
                 }
                 persist(uri)
                 soundfontUri = uri
-                soundfontButton.text = sfButtonLabel(uri)
+                soundfontButton.text = displayName(uri)
                 saveSettings()        // remember it across launches
             }
             REQ_BG_IMAGE -> {
@@ -979,10 +1277,6 @@ class MainActivity : Activity() {
     }
 
     private fun persist(uri: Uri) {
-        // takePersistableUriPermission is API 19+ — calling it below that is a
-        // NoSuchMethodError (not an Exception, so the catch won't save us). The
-        // browser's file:// URIs need no grant anyway.
-        if (Build.VERSION.SDK_INT < 19) return
         try {
             contentResolver.takePersistableUriPermission(
                 uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
@@ -1011,52 +1305,8 @@ class MainActivity : Activity() {
         startActivity(intent)
     }
 
-    /**
-     * "SF: <name>", cut down to whatever fits beside the settings panel.
-     *
-     * The button is anchored mid-left and grows rightward with its text, while
-     * the Voice Count / Note Speed panel is pinned bottom-right — so a long
-     * soundfont name runs straight underneath it. Where "too long" starts is a
-     * per-resolution question: a 2340px-wide S22U swallows most names whole,
-     * a 1280px-wide Stylo 3 collides after roughly half of one. So the limit is
-     * the real gap between the two, measured on this display, and a name past
-     * it gets cut with a trailing "...".
-     */
-    private fun sfButtonLabel(uri: Uri): String {
-        // Both activities are locked landscape, but the metrics can still be
-        // read portrait-side-up during the first onCreate — and configChanges
-        // swallows the rotation, so buildSetupScreen() never runs again to fix
-        // it. Take the long edge, which is the landscape width either way.
-        val m = resources.displayMetrics
-        val screenW = if (m.widthPixels > m.heightPixels) m.widthPixels else m.heightPixels
-        val budget = (screenW
-                      - dp(EDGE_MARGIN_DP)                        // the button's own left margin
-                      - dp(PANEL_WIDTH_DP) - dp(EDGE_MARGIN_DP)   // panel + the margin outside it
-                      - dp(SF_GAP_DP)
-                      - soundfontButton.paddingLeft
-                      - soundfontButton.paddingRight).toFloat()
-        return SF_PREFIX + truncateToWidth(displayName(uri), budget)
-    }
-
-    /** Longest head of [name] whose label still measures under [budgetPx]. */
-    private fun truncateToWidth(name: String, budgetPx: Float): String {
-        if (labelWidth(SF_PREFIX + name) <= budgetPx) return name
-        var end = name.length
-        while (end > 0 &&
-               labelWidth(SF_PREFIX + name.substring(0, end) + SF_ELLIPSIS) > budgetPx) {
-            end--
-        }
-        // Trailing space before the "..." only looks like a mistake.
-        return name.substring(0, end).trimEnd() + SF_ELLIPSIS
-    }
-
-    // Buttons draw all-caps under the Material themes, and caps are wider than
-    // the name measures raw — so measure the text as it will actually be drawn.
-    private fun labelWidth(text: String): Float {
-        val shown = soundfontButton.transformationMethod
-            ?.getTransformation(text, soundfontButton) ?: text
-        return soundfontButton.paint.measureText(shown.toString())
-    }
+    private fun sfButtonLabel(uri: Uri): String =
+        SF_PREFIX + displayName(uri)
 
     private fun displayName(uri: Uri): String {
         var name = uri.lastPathSegment ?: "file"
