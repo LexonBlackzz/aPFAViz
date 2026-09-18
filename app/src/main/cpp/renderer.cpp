@@ -35,16 +35,11 @@ attribute float aStartSec;
 attribute float aDurSec;
 attribute vec2 aKeyXW;       // x = normalised key left edge, y = normalised key width
 attribute vec4 aColorPrimary;
-attribute vec4 aColorDark;
-attribute vec4 aColorVeryDark;
-attribute float aIsSharp;
 uniform float uClockSec;
 uniform float uWindowSec;
 uniform float uKbFrac;
 uniform vec2  uViewportPx;
 varying vec4 vColorPrimary;
-varying vec4 vColorDark;
-varying vec4 vColorVeryDark;
 varying vec2 vUV;
 varying vec2 vSizePx;
 void main() {
@@ -56,9 +51,7 @@ void main() {
     float x = aKeyXW.x + aQuad.x * aKeyXW.y;
     float y = mix(yStart, yEnd, aQuad.y);
     vUV = aQuad;
-    vColorPrimary  = aColorPrimary;
-    vColorDark     = aColorDark;
-    vColorVeryDark = aColorVeryDark;
+    vColorPrimary = aColorPrimary;
     vSizePx = vec2(aKeyXW.y * uViewportPx.x, abs(yEnd - yStart) * uViewportPx.y);
     gl_Position = vec4(x * 2.0 - 1.0, y * 2.0 - 1.0, 0.0, 1.0);
 }
@@ -67,8 +60,6 @@ void main() {
 static const char* kNoteFS = R"(#version 100
 precision mediump float;
 varying vec4 vColorPrimary;
-varying vec4 vColorDark;
-varying vec4 vColorVeryDark;
 varying vec2 vUV;
 varying vec2 vSizePx;
 uniform float uWhiteKeyPx;
@@ -78,11 +69,11 @@ void main() {
     bool border = px.x < b || px.y < b ||
                   (vSizePx.x - px.x) < b || (vSizePx.y - px.y) < b;
     if (border) {
-        gl_FragColor = vec4(vColorVeryDark.rgb, 1.0);
+        gl_FragColor = vec4(vColorPrimary.rgb * 0.2, 1.0);
     } else {
         vec2 inner = (px - vec2(b)) / (vSizePx - vec2(b * 2.0));
         float t = inner.x;
-        vec3 c = mix(vColorPrimary.rgb, vColorDark.rgb, t);
+        vec3 c = mix(vColorPrimary.rgb, vColorPrimary.rgb * 0.6, t);
         gl_FragColor = vec4(c, 1.0);
     }
 }
@@ -661,9 +652,10 @@ void RendererES2::drawInstanced(GLuint prog, const void* data, int count,
 // Offsets match NoteInstance (renderer.h). `key` (offset 8) is read CPU-side to
 // fill keyX/keyW and is NOT bound here; aKeyXW (loc 3) is the vec2 at keyX/keyW.
 static const VAttr kNoteAttrs[] = {
-    {1,1,GL_FLOAT,GL_FALSE,0},{2,1,GL_FLOAT,GL_FALSE,4},{3,2,GL_FLOAT,GL_FALSE,12},
-    {4,4,GL_UNSIGNED_BYTE,GL_TRUE,20},{5,4,GL_UNSIGNED_BYTE,GL_TRUE,24},
-    {6,4,GL_UNSIGNED_BYTE,GL_TRUE,28},{7,1,GL_FLOAT,GL_FALSE,32} };
+    {1,1,GL_FLOAT,GL_FALSE,0},
+    {2,1,GL_FLOAT,GL_FALSE,4},
+    {3,2,GL_FLOAT,GL_FALSE,8},
+    {4,4,GL_UNSIGNED_BYTE,GL_TRUE,16} };
 static const VAttr kRectAttrs[] = {
     {1,4,GL_FLOAT,GL_FALSE,0},{2,4,GL_UNSIGNED_BYTE,GL_TRUE,16} };
 static const VAttr kGradAttrs[] = {
@@ -1281,15 +1273,11 @@ void RendererES2::render(float clockSec, float totalSec, float fps,
                 int k = (int)(n.key + 0.5f);
                 k = k < 0 ? 0 : (k > 127 ? 127 : k);
                 NoteInstanceES2 m;
-                m.startSec      = n.startSec;
-                m.durSec        = n.durSec;
-                m.key           = n.key;
-                m.keyX          = keyX_[k];
-                m.keyW          = keyW_[k];
-                m.colorPrimary  = n.colorPrimary;
-                m.colorDark     = n.colorDark;
-                m.colorVeryDark = n.colorVeryDark;
-                m.isSharp       = n.isSharp;
+                m.startSec     = n.startSec;
+                m.durSec       = n.durSec;
+                m.keyX         = keyX_[k];
+                m.keyW         = keyW_[k];
+                m.colorPrimary = n.colorPrimary;
                 notesScratch_.push_back(m);
             }
         };
@@ -1297,12 +1285,12 @@ void RendererES2::render(float clockSec, float totalSec, float fps,
         widen(whiteNotes);
         if (!notesScratch_.empty())
             drawInstanced(noteProg_, notesScratch_.data(), (int)notesScratch_.size(),
-                          sizeof(NoteInstanceES2), kNoteAttrs, 7, instVbo_);
+                          sizeof(NoteInstanceES2), kNoteAttrs, 4, instVbo_);
 
         widen(sharpNotes);
         if (!notesScratch_.empty())
             drawInstanced(noteProg_, notesScratch_.data(), (int)notesScratch_.size(),
-                          sizeof(NoteInstanceES2), kNoteAttrs, 7, instVbo_);
+                          sizeof(NoteInstanceES2), kNoteAttrs, 4, instVbo_);
     }
 
     // ---- PFA-faithful keyboard rendering ----
