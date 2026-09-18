@@ -351,38 +351,10 @@ bool Engine::load(const std::string& midiPath, const std::string& soundfontPath,
     for (const PlayEvent* e : midi_.events) {
         if (e->isNoteOn()) { firstNoteUs_ = e->absMicroSec; break; }
     }
-    if (midi_.valid) prepareTrackColorVariants();
 #ifdef APFA_STREAMING
     if (!midi_.valid) clearLoadMarker();   // clean failure, not an OOM death
 #endif
     return midi_.valid;
-}
-
-void Engine::prepareTrackColorVariants() {
-    const std::vector<uint32_t>& src = midi_.trackColors;
-    trackColorsDark_.resize(src.size());
-    trackColorsVeryDark_.resize(src.size());
-
-    for (size_t i = 0; i < src.size(); i++) {
-        uint32_t primary = src[i];
-        float r = ((primary >>  0) & 0xFF) / 255.0f;
-        float g = ((primary >>  8) & 0xFF) / 255.0f;
-        float b = ((primary >> 16) & 0xFF) / 255.0f;
-        float vmax = r > g ? (r > b ? r : b) : (g > b ? g : b);
-        float vmin = r < g ? (r < b ? r : b) : (g < b ? g : b);
-        float v = vmax;
-        float sat = vmax > 0.0f ? (vmax - vmin) / vmax : 0.0f;
-        float h = 0.0f;
-        if (vmax != vmin) {
-            float d = vmax - vmin;
-            if      (vmax == r) h = (g - b) / d + (g < b ? 6.0f : 0.0f);
-            else if (vmax == g) h = (b - r) / d + 2.0f;
-            else                h = (r - g) / d + 4.0f;
-            h /= 6.0f;
-        }
-        trackColorsDark_[i]     = packHSV(h, sat, v * 0.6f);
-        trackColorsVeryDark_[i] = packHSV(h, sat, v * 0.2f);
-    }
 }
 
 void Engine::start(void* surface) {
@@ -871,11 +843,6 @@ void Engine::buildVisible() {
         ni.key    = static_cast<float>(e.param1);
         size_t colorIdx = colorIndexOf(e);
         ni.colorPrimary = colorIdx < colors.size() ? colors[colorIdx] : 0xFFFFFFFFu;
-        ni.colorDark = colorIdx < trackColorsDark_.size()
-            ? trackColorsDark_[colorIdx] : ni.colorPrimary;
-        ni.colorVeryDark = colorIdx < trackColorsVeryDark_.size()
-            ? trackColorsVeryDark_[colorIdx] : ni.colorPrimary;
-        ni.isSharp = isSharpKey(e.param1) ? 1u : 0u;
         return ni;
     };
 
@@ -884,9 +851,10 @@ void Engine::buildVisible() {
     memset(keyColor_, 0, sizeof(keyColor_));
 
     auto appendInstance = [&](size_t pos) {
+        const PlayEvent& e = *ev[pos];
         NoteInstance ni = toInstance(pos);
-        if (ni.isSharp) sharpInstances_.push_back(ni);
-        else            whiteInstances_.push_back(ni);
+        if (isSharpKey(e.param1)) sharpInstances_.push_back(ni);
+        else                      whiteInstances_.push_back(ni);
     };
 
     for (int idx : active_)
