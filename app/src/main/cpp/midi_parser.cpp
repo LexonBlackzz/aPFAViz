@@ -288,13 +288,18 @@ MidiData parseMidi(const std::string& path, std::atomic<float>& progress,
     // list and are drawn first (underneath); the highest-numbered track is drawn last
     // (on top). Within the same track and timestamp, preserve original parse order
     // (pointer comparison works because all events are contiguous in eventPool).
-    std::stable_sort(out.events.begin(), out.events.end(),
+    // Parse order is the final tie-break explicitly, so stability is part of
+    // the comparator rather than paid for with stable_sort's O(N) temporary
+    // pointer buffer.
+    std::sort(out.events.begin(), out.events.end(),
               [](const PlayEvent* a, const PlayEvent* b) {
                   if (a->absMicroSec != b->absMicroSec)
                       return a->absMicroSec < b->absMicroSec;
                   if (a->track != b->track)
-                      return a->track < b->track;  // lower track = drawn first = underneath
-                  return a->channelEventType > b->channelEventType;  // non-notes first, note-on, note-off last
+                      return a->track < b->track;  // lower track = underneath
+                  if (a->channelEventType != b->channelEventType)
+                      return a->channelEventType > b->channelEventType;
+                  return a < b;  // same contiguous eventPool => parse order
               });
 
     // ---- program change and controller index ----
