@@ -65,7 +65,8 @@ public:
 
     void render(float clockSec, float totalSec, float fps,
                 float windowSec,
-                const std::vector<NoteInstance>& notes,
+                const std::vector<NoteInstance>& whiteNotes,
+                const std::vector<NoteInstance>& sharpNotes,
                 const uint32_t keyColor[128]) override;
 
 private:
