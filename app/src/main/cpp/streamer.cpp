@@ -321,7 +321,7 @@ struct SkimSink {
 
 // Fixup: a note-on that had already left the write buffer when its note-off
 // was emitted; its sister pointer is patched into the file by pass C.
-struct Fixup { uint32_t onIdx, offIdx; };
+struct Fixup { uint32_t onIdx, endUs; };
 struct Pair  { uint32_t onIdx, offIdx; };
 struct SortKey { uint64_t key; uint32_t idx; };
 
@@ -461,9 +461,9 @@ struct EmitSink {
     int      ticksPerQuarter = 480;
     size_t   trackSampleStep = 4096;
 
-    // Pool events store partner POOL INDICES in PlayEvent::link while the
-    // streamer builds its resident time-position link table. Playback never
-    // depends on a pointer baked into the file mapping.
+    // Pool note-ons store their final absolute end time in PlayEvent::link.
+    // Pair records separately build Streamer's resident partner-position table
+    // for slicing/seek bookkeeping.
     bool     encodeIdx = false;  // sliced-mode switch for resident seek payloads
 
     // outputs
@@ -597,17 +597,21 @@ struct EmitSink {
     void noteOff(int t, uint32_t tick, int ch, int key, uint32_t onIdx) {
         int c = ch & 0x0F;
         PlayEvent e{
-            0, onIdx, static_cast<uint16_t>(t),
+            0, kNoEventLink, static_cast<uint16_t>(t),
             static_cast<uint8_t>(0x80 | c), static_cast<uint8_t>(key & 0x7F), 0,
             static_cast<uint8_t>(c), static_cast<uint8_t>(kNoteOff), 0
         };
         uint32_t offIdx = emit(e, t, tick, kNoteOff);
         pairBuf.push_back({ onIdx, offIdx });
         if (chunked && pairBuf.size() >= kPairBufEntries) spillPairs();
+
+        uint64_t us64 = tickToUs(tick);
+        if (us64 > 0xFFFFFFFFull) us64 = 0xFFFFFFFFull;
+        const uint32_t endUs = static_cast<uint32_t>(us64);
         if (onIdx >= bufStart) {
-            buf[onIdx - bufStart].link = offIdx;
+            buf[onIdx - bufStart].link = endUs;
         } else {
-            fixups.push_back({ onIdx, offIdx });
+            fixups.push_back({ onIdx, endUs });
         }
     }
 
@@ -1369,7 +1373,7 @@ bool Streamer::open(const std::string& midiPath, MidiData& out,
             }
             while (i < emit.fixups.size() && emit.fixups[i].onIdx < c0 + n) {
                 const Fixup& f = emit.fixups[i];
-                chunk[f.onIdx - c0].link = f.offIdx;
+                chunk[f.onIdx - c0].link = f.endUs;
                 i++;
             }
             if (!poolPwrite(poolFds, chunk.data(), n * kEventSize, off)) {
@@ -2036,9 +2040,8 @@ bool Streamer::buildSlice(int sliceIdx, SliceMap& out) {
         }
         for (size_t k = i; k <= j; k++) {
             PlayEvent e = rbuf[need[k].poolIdx - base];
-            // PlayEvent::link remains the partner's pool index in the backing
-            // pool. Engine playback uses sisterPos_ (global time-order links),
-            // so slices no longer need to manufacture partner pointers.
+            // PlayEvent::link is already the note's absolute end time. Slices
+            // copy it verbatim; sisterPos_ remains separate bookkeeping.
 
             // The loader's per-track index, rebuilt against slot numbers. Pool
             // order is track-major, so tracks arrive in ascending order and
