@@ -25,7 +25,6 @@ import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ProgressBar
-import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
 import com.example.liquidglass.GlassMaterial
@@ -133,7 +132,7 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
     private var paused      = false
     private var userSeeking = false
     private lateinit var pauseButton: Button
-    private lateinit var seekBar: SeekBar
+    private lateinit var seekBar: GlassPlaybackSeekBar
     private var uiHidden     = false
     private var holdFired    = false
     private var lastStatsUpdateMs = 0L
@@ -887,29 +886,23 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
             ViewGroup.LayoutParams.WRAP_CONTENT
         ).apply { marginEnd = dp(12) })
 
-        seekBar = SeekBar(this).apply {
+        seekBar = GlassPlaybackSeekBar(this).apply {
             max = 1000
-            progressTintList = ColorStateList.valueOf(Color.rgb(45, 212, 191))
-            thumbTintList = ColorStateList.valueOf(Color.rgb(139, 92, 246))
-            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {}
-                override fun onStartTrackingTouch(s: SeekBar?) {
-                    userSeeking = true
-                    showTransportAndSchedule()
-                }
-                override fun onStopTrackingTouch(s: SeekBar?) {
-                    val minU = nativeGetMinMicros()
-                    val maxU = nativeGetMaxMicros()
-                    if (maxU > minU)
-                        nativeSeek(minU + (maxU - minU) *
-                            (s?.progress ?: 0).toLong() / 1000L)
-                    userSeeking = false
-                    showTransportAndSchedule()
-                }
-            })
+            onStartTracking = {
+                userSeeking = true
+                showTransportAndSchedule()
+            }
+            onStopTracking = { p ->
+                val minU = nativeGetMinMicros()
+                val maxU = nativeGetMaxMicros()
+                if (maxU > minU)
+                    nativeSeek(minU + (maxU - minU) * p.toLong() / 1000L)
+                userSeeking = false
+                showTransportAndSchedule()
+            }
         }
         bar.addView(seekBar, LinearLayout.LayoutParams(
-            0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f
+            0, dp(48), 1f
         ))
 
         pauseButton = Button(this).apply {
