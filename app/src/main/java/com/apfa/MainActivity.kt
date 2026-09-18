@@ -376,7 +376,7 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER
         }, LinearLayout.LayoutParams(mp, wc).apply { topMargin = dp(22) })
 
-        scroll.addView(page, ScrollView.LayoutParams(mp, wc))
+        scroll.addView(page, FrameLayout.LayoutParams(mp, wc))
         root.addView(scroll, FrameLayout.LayoutParams(mp, mp))
         return root
     }
