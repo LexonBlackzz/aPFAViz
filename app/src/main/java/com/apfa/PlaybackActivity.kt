@@ -1,13 +1,15 @@
 package com.apfa
 
 import android.app.Activity
-import android.app.ActionBar
 import android.app.AlertDialog
+import android.content.res.ColorStateList
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.RippleDrawable
 import android.net.Uri
-import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -18,11 +20,11 @@ import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.View
 import android.view.ViewGroup
-import android.view.Window
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.LinearLayout
+import android.widget.ProgressBar
 import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
@@ -127,20 +129,14 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
     private var lastTapTime  = 0L
     private var holdFired    = false
 
-    // getActionBar() is API 11+; on Gingerbread the method does not exist and
-    // calling it throws NoSuchMethodError (an Error — catch(Exception) misses it).
-    // Below 11 we never touch it: playback runs bare on the fullscreen surface,
-    // no seek bar, hold-to-pause still works.
-    private val hasActionBar = Build.VERSION.SDK_INT >= Build.VERSION_CODES.HONEYCOMB
+    private lateinit var transportBar: View
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // Pre-Honeycomb the default theme has a title bar, and FLAG_FULLSCREEN only
-        // takes the status bar. Drop it so playback is truly fullscreen. Never do
-        // this at 11+ — it would remove the action bar we host the transport in.
-        if (!hasActionBar) requestWindowFeature(Window.FEATURE_NO_TITLE)
+        actionBar?.hide()
         window.addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        window.navigationBarColor = Color.rgb(7, 9, 15)
 
         val midiUri = intent.getStringExtra(EXTRA_MIDI)
         if (midiUri == null) { finish(); return }
@@ -248,14 +244,56 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
     // ---- loading screen ----
 
     private fun showLoadingScreen() {
+        val root = FrameLayout(this).apply { setBackgroundColor(Color.rgb(7, 9, 15)) }
+        root.background = GradientDrawable(
+            GradientDrawable.Orientation.TL_BR,
+            intArrayOf(Color.rgb(20, 16, 38), Color.rgb(7, 9, 15), Color.rgb(8, 24, 28))
+        )
+
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(dp(28), dp(26), dp(28), dp(26))
+            background = transportPanelBackground()
+            elevation = dp(10).toFloat()
+        }
+        card.addView(TextView(this).apply {
+            text = "aPFA"
+            setTextColor(Color.WHITE)
+            textSize = 30f
+            typeface = Typeface.DEFAULT_BOLD
+            letterSpacing = 0.03f
+        })
+        card.addView(TextView(this).apply {
+            text = "Preparing the engine"
+            setTextColor(Color.rgb(176, 184, 205))
+            textSize = 13f
+        }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = dp(2) })
+
+        val spinner = ProgressBar(this).apply {
+            isIndeterminate = true
+            indeterminateTintList = ColorStateList.valueOf(Color.rgb(45, 212, 191))
+        }
+        card.addView(spinner, LinearLayout.LayoutParams(dp(42), dp(42)).apply {
+            topMargin = dp(20)
+            bottomMargin = dp(14)
+        })
+
         loadingText = TextView(this).apply {
             setTextColor(Color.WHITE)
-            textSize = 18f
+            textSize = 15f
             gravity = Gravity.CENTER
-            setBackgroundColor(Color.rgb(18, 18, 24))
-            text = "Loading..."
+            text = "Loading…"
         }
-        setContentView(loadingText)
+        card.addView(loadingText)
+
+        root.addView(card, FrameLayout.LayoutParams(
+            dp(300), ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { gravity = Gravity.CENTER })
+        setContentView(root)
         ui.post(loadingPoll)
     }
 
@@ -296,7 +334,7 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
 
     private fun showPlaybackScreen() {
         ui.removeCallbacks(loadingPoll)
-        val root = FrameLayout(this)
+        val root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
 
         val surface = SurfaceView(this)
         surface.holder.addCallback(this)
@@ -304,7 +342,7 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
 
         // Hold (400 ms): pause/resume immediately when threshold is reached.
-        // Double-tap (two short taps < 300 ms apart): hide/show the action bar.
+        // Double-tap (two short taps < 300 ms apart): hide/show transport chrome.
         val holdRunnable = Runnable {
             holdFired = true
             togglePause()
@@ -318,7 +356,6 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
                 android.view.MotionEvent.ACTION_UP, android.view.MotionEvent.ACTION_CANCEL -> {
                     ui.removeCallbacks(holdRunnable)
                     if (!holdFired) {
-                        // Short tap — check for double-tap
                         val now = System.currentTimeMillis()
                         if (now - lastTapTime < 300L) toggleUi()
                         lastTapTime = now
@@ -328,66 +365,88 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
             true
         }
 
-        // Action bar: seek bar + pause button.
-        // Time and FPS are drawn by the GL renderer every frame — no TextView needed.
-        if (hasActionBar) actionBar?.let { ab ->
-            val bar = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-            }
-            val title = TextView(this).apply {
-                text = "aPFA"
-                setTextColor(Color.WHITE)
-                textSize = 18f
-                typeface = android.graphics.Typeface.DEFAULT_BOLD
-            }
-            bar.addView(title, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply { rightMargin = dp(16) })
-            seekBar = SeekBar(this).apply {
-                max = 1000
-                setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                    override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {}
-                    override fun onStartTrackingTouch(s: SeekBar?) { userSeeking = true }
-                    override fun onStopTrackingTouch(s: SeekBar?) {
-                        // Map the slider across [min, max] = PFA's
-                        // [GetMinTime, GetMaxTime], so the far left seeks into the
-                        // -3s pre-roll (shows "-00:03"), like stock PFA:
-                        // JumpTo(llFirstTime + (llLastTime-llFirstTime)*p/1000).
-                        val minU = nativeGetMinMicros()
-                        val maxU = nativeGetMaxMicros()
-                        if (maxU > minU)
-                            nativeSeek(minU + (maxU - minU) * (s?.progress ?: 0).toLong() / 1000L)
-                        userSeeking = false
-                    }
-                })
-            }
-            bar.addView(seekBar, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-            pauseButton = Button(this).apply {
-                text = "❚❚"
-                setOnClickListener { togglePause() }
-            }
-            bar.addView(pauseButton)
-            ab.setDisplayShowTitleEnabled(false)
-            ab.setDisplayShowCustomEnabled(true)
-            ab.setCustomView(bar, ActionBar.LayoutParams(
-                ActionBar.LayoutParams.MATCH_PARENT,
-                ActionBar.LayoutParams.MATCH_PARENT))
+        // Floating transport: one layout works in portrait and landscape and
+        // avoids tying playback controls to the old platform ActionBar.
+        val bar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(14), dp(8), dp(10), dp(8))
+            background = transportPanelBackground()
+            elevation = dp(10).toFloat()
         }
+        val brand = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        brand.addView(TextView(this).apply {
+            text = "aPFA"
+            setTextColor(Color.WHITE)
+            textSize = 17f
+            typeface = Typeface.DEFAULT_BOLD
+        })
+        brand.addView(TextView(this).apply {
+            text = "PLAYBACK"
+            setTextColor(Color.rgb(45, 212, 191))
+            textSize = 9f
+            typeface = Typeface.DEFAULT_BOLD
+            letterSpacing = 0.12f
+        })
+        bar.addView(brand, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { marginEnd = dp(12) })
+
+        seekBar = SeekBar(this).apply {
+            max = 1000
+            progressTintList = ColorStateList.valueOf(Color.rgb(45, 212, 191))
+            thumbTintList = ColorStateList.valueOf(Color.rgb(139, 92, 246))
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {}
+                override fun onStartTrackingTouch(s: SeekBar?) { userSeeking = true }
+                override fun onStopTrackingTouch(s: SeekBar?) {
+                    val minU = nativeGetMinMicros()
+                    val maxU = nativeGetMaxMicros()
+                    if (maxU > minU)
+                        nativeSeek(minU + (maxU - minU) *
+                            (s?.progress ?: 0).toLong() / 1000L)
+                    userSeeking = false
+                }
+            })
+        }
+        bar.addView(seekBar, LinearLayout.LayoutParams(
+            0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f
+        ))
+
+        pauseButton = Button(this).apply {
+            text = "❚❚"
+            contentDescription = "Pause"
+            setOnClickListener { togglePause() }
+        }
+        styleTransportButton(pauseButton)
+        bar.addView(pauseButton, LinearLayout.LayoutParams(dp(48), dp(48)).apply {
+            marginStart = dp(8)
+        })
+
+        transportBar = bar
+        root.addView(bar, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply {
+            gravity = Gravity.TOP
+            setMargins(dp(14), dp(14), dp(14), 0)
+        })
 
         loadingOverlay = TextView(this).apply {
             setTextColor(Color.WHITE)
             textSize = 16f
             gravity = Gravity.CENTER
-            setBackgroundColor(Color.rgb(18, 18, 24))
-            text = "Starting...\n$infoLine"
+            setBackgroundColor(Color.argb(224, 7, 9, 15))
+            text = "Starting engine…\n\n$infoLine"
         }
         root.addView(loadingOverlay, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
 
         setContentView(root)
-        // Poll seek bar at ~display rate. This is only a UI control, not timing-critical.
         ui.post(seekPoll)
     }
 
@@ -445,11 +504,9 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
     override fun onResume() { super.onResume(); if (!paused) nativeResume() }
 
     private fun toggleUi() {
-        if (!hasActionBar) return  // nothing to hide — already bare
+        if (!::transportBar.isInitialized) return
         uiHidden = !uiHidden
-        actionBar?.let { ab ->
-            if (uiHidden) ab.hide() else ab.show()
-        }
+        transportBar.visibility = if (uiHidden) View.GONE else View.VISIBLE
     }
 
     private fun togglePause() {
@@ -457,6 +514,32 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
         if (paused) nativePause() else nativeResume()
         if (::pauseButton.isInitialized)
             pauseButton.text = if (paused) "▶" else "❚❚"
+    }
+
+    private fun transportPanelBackground(): GradientDrawable =
+        GradientDrawable().apply {
+            cornerRadius = dp(18).toFloat()
+            setColor(Color.argb(226, 18, 21, 32))
+            setStroke(dp(1), Color.argb(105, 139, 92, 246))
+        }
+
+    private fun styleTransportButton(button: Button) {
+        val shape = GradientDrawable().apply {
+            cornerRadius = dp(14).toFloat()
+            setColor(Color.rgb(139, 92, 246))
+        }
+        button.isAllCaps = false
+        button.setTextColor(Color.WHITE)
+        button.textSize = 15f
+        button.typeface = Typeface.DEFAULT_BOLD
+        button.background = RippleDrawable(
+            ColorStateList.valueOf(Color.argb(64, 255, 255, 255)),
+            shape,
+            null
+        )
+        button.stateListAnimator = null
+        button.elevation = dp(4).toFloat()
+        button.setPadding(0, 0, 0, 0)
     }
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
