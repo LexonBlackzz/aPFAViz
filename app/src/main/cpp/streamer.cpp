@@ -43,6 +43,7 @@
 #include <utility>
 
 #include "platform.h"
+#include "parallel_load.h"
 
 namespace apfa {
 namespace {
@@ -506,6 +507,7 @@ struct EmitSink {
     std::vector<SortKey>  runBuf;
     std::vector<uint64_t> runStarts;     // first entry index of each run
     uint64_t runEntries = 0;
+    unsigned sortWorkersUsed = 1;
     // Note pairs: same split (8 B/note resident, or spilled and streamed back
     // to build sisterPos).
     int      pairsFd = -1;
@@ -519,7 +521,9 @@ struct EmitSink {
 
     void spillRun() {
         if (runBuf.empty() || ioError) return;
-        std::sort(runBuf.begin(), runBuf.end(), sortKeyLess);
+        const unsigned workers =
+            parallelSort(runBuf.begin(), runBuf.end(), sortKeyLess, 262144, 4);
+        if (workers > sortWorkersUsed) sortWorkersUsed = workers;
         if (wouldExhaustDisk(runsFd, runBuf.size() * sizeof(SortKey))) {
             diskFull = ioError = true;
             return;
@@ -1346,10 +1350,14 @@ bool Streamer::open(const std::string& midiPath, MidiData& out,
     } else {
         // One whole-table sort in place of the run spills — same comparator,
         // so the merged and un-merged orders are byte-identical.
-        std::sort(emit.runBuf.begin(), emit.runBuf.end(), sortKeyLess);
+        emit.sortWorkersUsed =
+            parallelSort(emit.runBuf.begin(), emit.runBuf.end(),
+                         sortKeyLess, 524288, 4);
         emit.runEntries = emit.runBuf.size();
         emit.pairCount  = emit.pairBuf.size();
     }
+    LOGI("streamer: sort used up to %u worker(s)%s",
+         emit.sortWorkersUsed, chunked ? " per run" : "");
     munmap(midiMap, fileSize);
 
     // From here on, every failure path must release the spill fds too
