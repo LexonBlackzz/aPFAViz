@@ -614,7 +614,7 @@ void Engine::frame() {
     uint64_t tDisp = nowUs();
     dispatch();
     advancePcCursor();
-    synth_.flush();   // one raw BASS_MIDI_StreamEvents call for the whole frame
+    synth_.flush();   // one/few bounded raw BASS submissions for the frame
     uint64_t tBuild = nowUs();
     buildVisible();
     uint64_t tEnd = nowUs();
@@ -670,10 +670,11 @@ void Engine::frame() {
         fpsFrames_ = 0;
         uint64_t sc = 0, su = 0, bp = 0;
         synth_.sampleEventCost(sc, su, bp);
-        LOGI("perf: %.0f fps | engine %.0f%% cpu | synth %llu calls %.1f ms total (%.1f%% wall)",
+        LOGI("perf: %.0f fps | engine %.0f%% cpu | synth %llu events / %llu batches, %.1f ms submit (%.1f%% wall)",
              pubFps_.load(), cpuDelta * 100.0 / static_cast<double>(window),
-             static_cast<unsigned long long>(sc), su / 1000.0,
-             su * 100.0 / static_cast<double>(window));
+             static_cast<unsigned long long>(sc),
+             static_cast<unsigned long long>(bp),
+             su / 1000.0, su * 100.0 / static_cast<double>(window));
         double inv = frames > 0 ? 1.0 / frames : 0.0;
         // Only when the overload guard actually had to thin the audio — a
         // silent log here means BASSMIDI kept up on its own.
@@ -957,7 +958,8 @@ void Engine::applySeek(int64_t target) {
     size_t oldPcCursor = pcCursor_;
     advancePcCursor();
     playSkippedEvents(oldPcCursor);
-    
+    synth_.flush();
+
     pubTimeUs_.store(static_cast<int64_t>(clockUs_));
     LOGI("seek -> %.1f s, %zu active", target * 1e-6, active_.size());
 }
