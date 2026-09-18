@@ -198,7 +198,7 @@ bool walkOneTrack(const uint8_t* begin, const uint8_t* end, int track, Sink& sin
         if (status < 0x80) {
             r.p--;
             status = running;
-            if (status < 0x80) return false;
+            if (status < 0x80) break;
         } else {
             running = status;
         }
@@ -242,9 +242,9 @@ bool walkOneTrack(const uint8_t* begin, const uint8_t* end, int track, Sink& sin
         } else if (status == 0xF0 || status == 0xF7) {
             r.skip(r.varlen());
         } else {
-            return false;
+            break;
         }
-        if (!r.ok) return false;
+        if (!r.ok) break;
     }
 
     // Preserve the original FIFO close-out at end-of-track.
@@ -253,7 +253,7 @@ bool walkOneTrack(const uint8_t* begin, const uint8_t* end, int track, Sink& sin
             for (uint32_t onTok : pending[c][k])
                 sink.noteOff(track, absTick, c, k, onTok);
 
-    return r.ok;
+    return true;
 }
 
 bool readHeaderAndTracks(const uint8_t* base, const uint8_t* fileEnd,
