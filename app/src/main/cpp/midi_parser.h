@@ -10,6 +10,32 @@
 
 namespace apfa {
 
+struct MidiTempoPoint {
+    uint32_t tick = 0;
+    uint32_t usPerQuarter = 500000;
+};
+
+struct MidiTrackPlan {
+    uint64_t fileOffset = 0;     // first byte of MTrk payload
+    uint32_t fileLength = 0;
+    uint64_t eventCount = 0;     // exact emitted PlayEvent count
+    uint64_t noteCount = 0;      // note-on count
+    uint16_t hasNotesMask = 0;   // bit per MIDI channel
+    std::vector<MidiTempoPoint> tempos;
+};
+
+struct MidiPreScan {
+    std::vector<MidiTrackPlan> tracks;
+    uint64_t eventCount = 0;
+    uint64_t noteCount = 0;
+    int ticksPerQuarter = 480;
+    bool valid = false;
+};
+
+// Parallel exact track skim used by Android's routing decision and then reused
+// by parseMidi(), so the count pass is not thrown away before the real parse.
+MidiPreScan scanMidi(const std::string& path, std::atomic<float>& progress);
+
 struct MidiData {
     // eventPool holds every PlayEvent in PARSE order (track by track) — this is
     // the scatter source. events[] points into it, sorted by time; walking it in
@@ -51,6 +77,7 @@ struct MidiData {
 // gets. The parameter is defaulted so every existing 2-argument call site --
 // the iOS engine included -- still compiles unchanged.
 MidiData parseMidi(const std::string& path, std::atomic<float>& progress,
-                   uint64_t expectedEvents = 0);
+                   uint64_t expectedEvents = 0,
+                   const MidiPreScan* preScan = nullptr);
 
 }  // namespace apfa

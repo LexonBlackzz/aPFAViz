@@ -746,36 +746,9 @@ uint64_t readMemAvailable() {
 // ---- predict -------------------------------------------------------------------
 
 uint64_t Streamer::predictEventCount(const std::string& midiPath) {
-    int fd = ::open(midiPath.c_str(), O_RDONLY);
-    if (fd < 0) return 0;
-    struct stat st;
-    if (fstat(fd, &st) != 0 || st.st_size < 14) { ::close(fd); return 0; }
-    size_t fileSize = static_cast<size_t>(st.st_size);
-    void* map = mmap(nullptr, fileSize, PROT_READ, MAP_PRIVATE, fd, 0);
-    ::close(fd);
-    if (map == MAP_FAILED) return 0;
-    const uint8_t* mbase   = static_cast<const uint8_t*>(map);
-    const uint8_t* fileEnd = mbase + fileSize;
-
-    Reader hdr{ mbase, fileEnd };
-    if (hdr.u8() != 'M' || hdr.u8() != 'T' || hdr.u8() != 'h' || hdr.u8() != 'd') {
-        munmap(map, fileSize); return 0;
-    }
-    uint32_t hdrLen = hdr.u32();
-    hdr.u16();
-    uint32_t numTracks = hdr.u16();
-    hdr.u16();
-    if (hdrLen > 6) hdr.skip(hdrLen - 6);
-
-    SkimSink skim;
-    std::atomic<float> dummy{0};
-    int maxTrack = 0;
-    walkTracks(hdr.p, fileEnd, numTracks, skim, dummy, 0.0f, 0.0f, maxTrack);
-    munmap(map, fileSize);
-
-    uint64_t total = 0;
-    for (size_t c : skim.trackCounts) total += c;
-    return total;
+    std::atomic<float> dummy{0.0f};
+    MidiPreScan scan = scanMidi(midiPath, dummy);
+    return scan.valid ? scan.eventCount : 0;
 }
 
 // ---- open --------------------------------------------------------------------
