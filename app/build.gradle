@@ -33,9 +33,9 @@ android {
 
     defaultConfig {
         applicationId 'com.apfa'
-        // Android 6.0 (Marshmallow). This deliberately drops the legacy
-        // Gingerbread/pre-SAF UI paths and gives the shell a clean modern floor.
-        minSdk 23
+        // Android 7.0 (Nougat). LiquidGlass requires API 24+, while the
+        // rest of the shell continues to avoid legacy pre-SAF compatibility paths.
+        minSdk 24
         targetSdk 34
         versionCode 17
         versionName '1.3.1'
@@ -78,4 +78,8 @@ android {
     kotlinOptions {
         jvmTarget = '17'
     }
+}
+
+dependencies {
+    implementation 'com.github.QWEA0:liquidglass:v2.0.10'
 }
