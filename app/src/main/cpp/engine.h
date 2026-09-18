@@ -111,7 +111,6 @@ private:
     void frame();
     void dispatch();
     void buildVisible();
-    void prepareTrackColorVariants();
     void applySeek(int64_t target);
     // events[pos]'s time without dereferencing it — a sliced streaming load
     // maps only one slice at a time (streamer.h).
@@ -188,8 +187,6 @@ private:
     // render scratch — built and consumed inline on the engine thread
     std::vector<NoteInstance> whiteInstances_;
     std::vector<NoteInstance> sharpInstances_;
-    std::vector<uint32_t> trackColorsDark_;
-    std::vector<uint32_t> trackColorsVeryDark_;
     uint32_t keyColor_[128] = {0};
 
     // metrics
