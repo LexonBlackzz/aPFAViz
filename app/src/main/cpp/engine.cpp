@@ -865,19 +865,24 @@ void Engine::audioMain(int64_t initialUs) {
 }
 
 void Engine::frame() {
-    // --- one-frame-delayed clock ---
-    // Advance by the previous frame's wall time, which now includes
-    // eglSwapBuffers — exactly as PFA's clock advances by the time including
-    // D3D Present(). GPU cost on slow hardware stretches the frame faithfully.
-    uint64_t now     = nowUs();
-    uint64_t elapsed = now - lastWall_;
+    // Visuals sample the scheduler's song clock on the separated path. On the
+    // sliced 32-bit fallback we retain the old one-frame-delayed clock because
+    // visual dispatch still owns MIDI submission there.
+    const uint64_t now = nowUs();
+    const uint64_t elapsed = now - lastWall_;
     lastWall_ = now;
-    if (eventCursor_ < midi_.events.size()) clockUs_ += static_cast<int64_t>(elapsed);
+    const bool separate = decoupledAudio_.load(std::memory_order_acquire);
+    if (separate) {
+        clockUs_ = pubAudioTimeUs_.load(std::memory_order_acquire);
+    } else if (eventCursor_ < midi_.events.size()) {
+        clockUs_ += static_cast<int64_t>(elapsed);
+    }
 
     uint64_t tDisp = nowUs();
     dispatch();
     advancePcCursor();
-    synth_.flush();   // one/few bounded raw BASS submissions for the frame
+    if (!separate)
+        synth_.flush();
     uint64_t tBuild = nowUs();
     buildVisible();
     uint64_t tEnd = nowUs();
@@ -886,8 +891,8 @@ void Engine::frame() {
     sumDispatchUs_ += dUs;  if (dUs > maxDispatchUs_) maxDispatchUs_ = dUs;
     sumBuildUs_    += bUs;  if (bUs > maxBuildUs_)    maxBuildUs_    = bUs;
 
-    // Render + present — on the engine thread, so the swap stall enters the
-    // next frame's clock advance (one-frame-delayed, same as PFA).
+    // Render + present remains visual-thread-owned. In separated mode the
+    // vblank stall affects FPS only; MIDI scheduling continues independently.
     int sw = surfW_.load(), sh = surfH_.load();
     if (sw > 0 && sh > 0) renderer_->resize(sw, sh);
     renderer_->setBgColor(bgColor_.load());
@@ -895,8 +900,8 @@ void Engine::frame() {
     renderer_->render(clockUs_ * 1e-6f, midi_.totalUs * 1e-6f,
                      pubFps_.load(),
                      3.0f * noteSpeed_, whiteInstances_, sharpInstances_, keyColor_);
-    // eglSwapBuffers is called inside renderer_->render(); it stalls here until
-    // vblank. That stall is part of lastWall_ -> now on the next frame.
+    // eglSwapBuffers is called inside renderer_->render(); it may stall here,
+    // but the MIDI scheduler and BASS update/render threads continue running.
     uint64_t tPresented = nowUs();
     uint64_t rUs = tPresented - tEnd;
     sumRenderUs_ += rUs;
@@ -938,6 +943,15 @@ void Engine::frame() {
              static_cast<unsigned long long>(sc),
              static_cast<unsigned long long>(bp),
              su / 1000.0, su * 100.0 / static_cast<double>(window));
+        if (separate) {
+            const uint64_t audioEvents =
+                audioSubmittedWindow_.exchange(0, std::memory_order_relaxed);
+            const uint64_t lateMax =
+                audioLateMaxUs_.exchange(0, std::memory_order_relaxed);
+            LOGI("audio: %llu ev submitted | scheduler late max %.3f ms",
+                 static_cast<unsigned long long>(audioEvents),
+                 lateMax / 1000.0);
+        }
         double inv = frames > 0 ? 1.0 / frames : 0.0;
         // Only when the overload guard actually had to thin the audio — a
         // silent log here means BASSMIDI kept up on its own.
@@ -994,6 +1008,8 @@ void Engine::dispatch() {
     const std::vector<PlayEvent*>& ev = midi_.events;
     const size_t n = ev.size();
     const size_t startCursor = eventCursor_;
+    const bool submitAudio =
+        !decoupledAudio_.load(std::memory_order_acquire);
 #ifdef APFA_STREAMING
     // A sliced load (32-bit, SLICED-POOL-DESIGN.md) has only one slice mapped
     // at a time, so the walk stops at its transition point and picks up in the
@@ -1010,14 +1026,16 @@ void Engine::dispatch() {
             int ch  = e->channel;
             int key = e->param1;
             if (e->isNonNote()) {
-                synth_.sendRaw(static_cast<uint8_t>(e->eventCode), e->param1, e->param2);
+                if (submitAudio)
+                    synth_.sendRaw(static_cast<uint8_t>(e->eventCode),
+                                   e->param1, e->param2);
             } else if (e->isNoteOn()) {
-                synth_.noteOn(ch, key, e->param2);
+                if (submitAudio) synth_.noteOn(ch, key, e->param2);
                 active_.push_back(static_cast<int>(eventCursor_));
                 noteState_[key] = static_cast<int>(eventCursor_);
                 ++noteOnsWindow_;
             } else {
-                synth_.noteOff(ch, key);
+                if (submitAudio) synth_.noteOff(ch, key);
                 // Do not scan/erase active_ here. On dense passages this used to
                 // walk and memmove the active-note vector once PER note-off,
                 // turning dispatch into O(noteOffs * polyphony). After all due
@@ -1185,7 +1203,8 @@ void Engine::applySeek(int64_t target) {
         LOGE("seek -> %.1f s: no slice could be mapped — playback stops here",
              target * 1e-6);
         eventCursor_ = windowCursor_ = n;
-        synth_.allNotesOff();
+        if (!decoupledAudio_.load(std::memory_order_acquire))
+            synth_.allNotesOff();
         pubTimeUs_.store(static_cast<int64_t>(clockUs_));
         return;
     }
@@ -1226,14 +1245,16 @@ void Engine::applySeek(int64_t target) {
 #endif
     }
 
-    synth_.allNotesOff();
-    
+    const bool separate = decoupledAudio_.load(std::memory_order_acquire);
     size_t oldPcCursor = pcCursor_;
     advancePcCursor();
-    playSkippedEvents(oldPcCursor);
-    synth_.flush();
+    if (!separate) {
+        synth_.allNotesOff();
+        playSkippedEvents(oldPcCursor);
+        synth_.flush();
+    }
 
-    pubTimeUs_.store(static_cast<int64_t>(clockUs_));
+    pubTimeUs_.store(static_cast<int64_t>(clockUs_), std::memory_order_release);
     LOGI("seek -> %.1f s, %zu active", target * 1e-6, active_.size());
 }
 
