@@ -267,19 +267,11 @@ bool Engine::load(const std::string& midiPath, const std::string& soundfontPath,
             }
             if (streamer_.noAddrSpace()) {
                 // The pool itself fits but the un-chunked sort table does not,
-                // and the chunked on-disk sort would. That is a mode problem,
-                // not an impossible load: take the other mode if the user has
-                // allowed it, and otherwise say which switch to flip rather
-                // than telling them to go find a 64-bit phone.
+                // and the chunked on-disk sort would. Retry automatically:
+                // memory safety is no longer gated behind a user toggle.
                 if (streamer_.needsChunked() && !chunked) {
-                    if (!allowChunked) {
-                        LOGI("needs the chunked on-disk sort to fit the address "
-                             "space, and Chunked Disk Streaming is off");
-                        loadError_ = kLoadNeedsChunked;
-                        return false;
-                    }
-                    LOGI("retrying with the chunked on-disk sort — it needs "
-                         "less address space than the in-RAM sort");
+                    LOGI("retrying automatically with the chunked on-disk sort — "
+                         "it needs less address space than the in-RAM sort");
                     chunked = true;
                     try {
                         opened = streamer_.open(midiPath, midi_, loadProgress_,
