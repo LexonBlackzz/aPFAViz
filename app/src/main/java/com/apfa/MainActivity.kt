@@ -175,13 +175,16 @@ class MainActivity : Activity() {
         val portrait = resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT
 
         val root = FrameLayout(this).apply { setBackgroundColor(uiBg) }
+        // Keep the visual stage in one sibling ViewGroup so LiquidGlass samples
+        // the exact wallpaper + vignette that is actually behind the controls.
+        val backdrop = FrameLayout(this)
         val bg = ImageView(this).apply {
             scaleType = ImageView.ScaleType.CENTER_CROP
             alpha = 0.58f
         }
         loadAsset("apfa-wp.jpg")?.let { bg.setImageBitmap(it) } ?: bg.setBackgroundColor(uiBg)
-        root.addView(bg, FrameLayout.LayoutParams(mp, mp))
-        root.addView(View(this).apply {
+        backdrop.addView(bg, FrameLayout.LayoutParams(mp, mp))
+        backdrop.addView(View(this).apply {
             background = GradientDrawable(
                 GradientDrawable.Orientation.TOP_BOTTOM,
                 intArrayOf(
@@ -191,6 +194,7 @@ class MainActivity : Activity() {
                 )
             )
         }, FrameLayout.LayoutParams(mp, mp))
+        root.addView(backdrop, FrameLayout.LayoutParams(mp, mp))
 
         val scroll = ScrollView(this).apply {
             isFillViewport = true
@@ -238,7 +242,6 @@ class MainActivity : Activity() {
         val openCard = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(16), dp(16), dp(16))
-            elevation = dp(7).toFloat()
         }
         openCard.addView(TextView(this).apply {
             text = "MIDI"
@@ -258,7 +261,7 @@ class MainActivity : Activity() {
         }
         styleShellButton(midiButton, primary = true)
         openCard.addView(midiButton, LinearLayout.LayoutParams(mp, dp(56)).apply { topMargin = dp(18) })
-        page.addView(glassPanel(openCard, bg, accented = true),
+        page.addView(glassPanel(openCard, backdrop, accented = true),
             LinearLayout.LayoutParams(mp, wc))
 
         // Recent files use the persisted SAF URI grants; no duplicate metadata scan.
@@ -291,7 +294,7 @@ class MainActivity : Activity() {
                     setBackgroundColor(Color.argb(38, 255, 255, 255))
                 }, LinearLayout.LayoutParams(mp, dp(1)))
             }
-            page.addView(glassPanel(recentCard, bg))
+            page.addView(glassPanel(recentCard, backdrop))
         }
 
         // Compact SoundFont chip row.
@@ -330,7 +333,7 @@ class MainActivity : Activity() {
             textSize = 24f
             gravity = Gravity.CENTER
         }, LinearLayout.LayoutParams(dp(28), dp(48)))
-        page.addView(glassPanel(sfRow, bg, cornerDp = 18))
+        page.addView(glassPanel(sfRow, backdrop, cornerDp = 18))
 
         // Quick settings: exact value is tappable; slider retains fast tuning.
         page.addView(sectionTitle("Quick settings"), LinearLayout.LayoutParams(mp, wc).apply {
@@ -381,7 +384,7 @@ class MainActivity : Activity() {
             textSize = 24f
         })
         quick.addView(bgRow, LinearLayout.LayoutParams(mp, wc))
-        page.addView(glassPanel(quick, bg))
+        page.addView(glassPanel(quick, backdrop))
 
         scroll.addView(page, FrameLayout.LayoutParams(mp, wc))
         root.addView(scroll, FrameLayout.LayoutParams(mp, mp))
@@ -399,6 +402,7 @@ class MainActivity : Activity() {
     ): LiquidGlassView =
         LiquidGlassView(this).apply {
             cornerRadius = dp(cornerDp).toFloat()
+            elevation = dp(if (accented) 8 else 5).toFloat()
             material = GlassMaterial.REGULAR
             blurAmount = if (accented) 0.11f else 0.085f
             saturation = 118f
