@@ -1152,7 +1152,8 @@ void RendererES2::renderKeyboard(const uint32_t keyColor[128]) {
 
 void RendererES2::render(float clockSec, float totalSec, float fps,
                       float windowSec,
-                      const std::vector<NoteInstance>& notes,
+                      const std::vector<NoteInstance>& whiteNotes,
+                      const std::vector<NoteInstance>& sharpNotes,
                       const uint32_t keyColor[128]) {
     if (!valid()) return;
 
@@ -1251,7 +1252,7 @@ void RendererES2::render(float clockSec, float totalSec, float fps,
     }
 
     // ---- note field — whites first, then sharps on top (PFA layering) ----
-    if (!notes.empty()) {
+    if (!whiteNotes.empty() || !sharpNotes.empty()) {
         glUseProgram(noteProg_);
         glUniform1f(glGetUniformLocation(noteProg_, "uClockSec"), clockSec);
         glUniform1f(glGetUniformLocation(noteProg_, "uWindowSec"),
@@ -1265,17 +1266,12 @@ void RendererES2::render(float clockSec, float totalSec, float fps,
         }
         glUniform1f(glGetUniformLocation(noteProg_, "uWhiteKeyPx"), whiteKeyPx);
 
-        // Fill each instance's keyX/keyW from the key layout (replaces the old
-        // dynamically-indexed uKey[] uniform — see kNoteVS). Folds into the
-        // existing white/sharp split copy, so no extra per-note pass.
-        auto fillSplit = [&](uint32_t wantSharp) {
+        auto widen = [&](const std::vector<NoteInstance>& src) {
             notesScratch_.clear();
-            for (const auto& n : notes) {
-                if (n.isSharp != wantSharp) continue;
+            notesScratch_.reserve(src.size());
+            for (const auto& n : src) {
                 int k = (int)(n.key + 0.5f);
                 k = k < 0 ? 0 : (k > 127 ? 127 : k);
-                // Widen the shared 28-byte NoteInstance into the renderer's
-                // 36-byte NoteInstanceES2, filling keyX/keyW from the key layout.
                 NoteInstanceES2 m;
                 m.startSec      = n.startSec;
                 m.durSec        = n.durSec;
@@ -1290,15 +1286,12 @@ void RendererES2::render(float clockSec, float totalSec, float fps,
             }
         };
 
-        // Pass 1: white key notes (uniforms set above persist through drawInstanced,
-        // which re-binds noteProg_).
-        fillSplit(0u);
+        widen(whiteNotes);
         if (!notesScratch_.empty())
             drawInstanced(noteProg_, notesScratch_.data(), (int)notesScratch_.size(),
                           sizeof(NoteInstanceES2), kNoteAttrs, 7, instVbo_);
 
-        // Pass 2: sharp key notes on top
-        fillSplit(1u);
+        widen(sharpNotes);
         if (!notesScratch_.empty())
             drawInstanced(noteProg_, notesScratch_.data(), (int)notesScratch_.size(),
                           sizeof(NoteInstanceES2), kNoteAttrs, 7, instVbo_);
