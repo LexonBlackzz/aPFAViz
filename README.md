@@ -11,6 +11,11 @@ aPFAs current features as of **v1.3.1** are:
 - Background color chooser along with custom images
 - Color profiles!
 - Legacy OpenGL ES 2.0 renderer
+- Responsive portrait + landscape UI
 - **Pagefiling! (and chunked paging) for very large MIDIs!** (with SD cards too for 64-bit!)
 
   <img width="48" height="48" alt="aPFAlogo" src="https://github.com/user-attachments/assets/cc1f24f7-b5a1-4daa-87d9-4bca952d007e" />
+
+## Android requirement
+
+This UI refresh raises the minimum supported version to **Android 6.0 (API 23)**. The native playback engine remains the same; the higher floor removes the pre-KitKat/Gingerbread UI compatibility paths and makes future interface work much simpler.
