@@ -125,6 +125,10 @@ private:
     GLuint textProg_ = 0;
     GLuint bgProg_   = 0;   // stretched background-image quad
 
+    GLint noteUClock_ = -1, noteUWindow_ = -1, noteUKbFrac_ = -1;
+    GLint noteUViewport_ = -1, noteUWhiteKey_ = -1;
+    GLint bgUYBottom_ = -1, bgUTex_ = -1;
+
     // VBOs (one per instanced pipeline + the shared unit quad)
     GLuint instVbo_     = 0;
     GLuint rectInstVbo_ = 0;
