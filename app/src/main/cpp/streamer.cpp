@@ -457,7 +457,6 @@ struct EmitSink {
     // configured by open()
     const std::vector<int>* fds = nullptr;   // the pool chain (see poolFileBytes())
     uint64_t written = 0;                    // byte cursor across the whole chain
-    const std::vector<PoolSeg>* poolSegs = nullptr;
     const std::vector<TempoSeg>* segs = nullptr;
     int      ticksPerQuarter = 480;
     size_t   trackSampleStep = 4096;
@@ -1286,7 +1285,6 @@ bool Streamer::open(const std::string& midiPath, MidiData& out,
     std::string runsPath, pairsPath;   // named only on the SD path (see above)
     EmitSink emit;
     emit.fds  = &poolFds;
-    emit.poolSegs = &segs_;
     emit.segs = &segs;
     emit.ticksPerQuarter = ticksPerQuarter;
     emit.trackSampleStep = kTrackSampleStep;
@@ -2457,8 +2455,8 @@ void Streamer::loaderTickLocked(int64_t t) {
     const int64_t frontUs = budgetedFrontUs(t);
 
     // Front-edge scan: pre-touch the note-offs of long notes entering the
-    // window, so buildVisible's duration read (e->sister->absMicroSec) never
-    // faults on the engine thread. These stay SYNCHRONOUS — one scattered page
+    // window, so buildVisible's duration lookup does not fault the partner page
+    // on the engine thread. These stay SYNCHRONOUS — one scattered page
     // each, and blocking here is how the loader paces itself against storage
     // instead of racing ahead of it.
     //
