@@ -300,13 +300,32 @@ void Synth::start(uint64_t) {
 // arriving after you had already seeked somewhere else.
 void Synth::pause() {
     if (!midiStream_) return;
+
+    // Cancel future async input and release notes in ONE ordered submission.
+    // Keeping pitch untouched preserves PFA's pause/resume behavior.
     rawBatch_.clear();
-    BASS_MIDI_StreamEvents(
+    uint8_t release[16 * 6];
+    size_t n = 0;
+    for (int c = 0; c < 16; ++c) {
+        release[n++] = static_cast<uint8_t>(0xB0 | c);
+        release[n++] = 123;
+        release[n++] = 0;
+        release[n++] = static_cast<uint8_t>(0xB0 | c);
+        release[n++] = 64;
+        release[n++] = 0;
+    }
+    const uint64_t t0 = nowUs();
+    const DWORD done = BASS_MIDI_StreamEvents(
         midiStream_,
         BASS_MIDI_EVENTS_RAW | BASS_MIDI_EVENTS_ASYNC |
             BASS_MIDI_EVENTS_CANCEL,
-        nullptr, 0);
-    releaseAllNotes();
+        release, static_cast<DWORD>(n));
+    evMicros_.fetch_add(nowUs() - t0, std::memory_order_relaxed);
+    bassCalls_.fetch_add(1, std::memory_order_relaxed);
+    evCalls_.fetch_add(32, std::memory_order_relaxed);
+    if (done == static_cast<DWORD>(-1))
+        LOGE("BASS pause cancel/release failed: %d", BASS_ErrorGetCode());
+    guardArmed_.store(false, std::memory_order_relaxed);
 }
 
 void Synth::resume() {
