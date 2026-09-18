@@ -742,11 +742,11 @@ void Engine::dispatch() {
             } else {
                 synth_.noteOff(ch, key);
                 noteState_[key] = -1;
-                const PlayEvent* sister = e->sister;
+                const uint32_t onPos = partnerPosAt(eventCursor_);
                 size_t i = 0;
                 while (i < active_.size()) {
                     PlayEvent* a = ev[active_[i]];
-                    if (a == sister) {
+                    if (static_cast<uint32_t>(active_[i]) == onPos) {
                         active_.erase(active_.begin() + static_cast<long>(i));
                     } else {
                         if (a->param1 == key) noteState_[key] = active_[i];
@@ -825,11 +825,14 @@ void Engine::buildVisible() {
         return pc==1||pc==3||pc==6||pc==8||pc==10;
     };
 
-    auto toInstance = [&](const PlayEvent& e) -> NoteInstance {
+    auto toInstance = [&](size_t pos) -> NoteInstance {
+        const PlayEvent& e = *ev[pos];
         NoteInstance ni;
         ni.startSec = e.absMicroSec * 1e-6f;
-        int64_t endUs = e.sister ? e.sister->absMicroSec : e.absMicroSec;
-        ni.durSec = static_cast<float>(endUs - e.absMicroSec) * 1e-6f;
+        uint32_t partner = partnerPosAt(pos);
+        int64_t endUs = (partner != kNoEventLink) ? eventUsAt(partner)
+                                                  : static_cast<int64_t>(e.absMicroSec);
+        ni.durSec = static_cast<float>(endUs - static_cast<int64_t>(e.absMicroSec)) * 1e-6f;
         ni.key    = static_cast<float>(e.param1);
         ni.colorPrimary = colorOf(e);
         deriveColors(ni.colorPrimary, ni.colorDark, ni.colorVeryDark);
@@ -841,13 +844,13 @@ void Engine::buildVisible() {
     memset(keyColor_, 0, sizeof(keyColor_));
 
     for (int idx : active_)
-        instances_.push_back(toInstance(*ev[idx]));
+        instances_.push_back(toInstance(static_cast<size_t>(idx)));
     for (int k = 0; k < 128; k++)
         if (noteState_[k] >= 0)
             keyColor_[k] = colorOf(*ev[noteState_[k]]);
     for (size_t j = eventCursor_; j < windowCursor_; j++) {
         const PlayEvent* e = ev[j];
-        if (e->isNoteOn()) instances_.push_back(toInstance(*e));
+        if (e->isNoteOn()) instances_.push_back(toInstance(j));
     }
 }
 
@@ -917,7 +920,8 @@ void Engine::applySeek(int64_t target) {
         // and "off time > target" are the same predicate.
         for (size_t j = 0; j < eventCursor_; j++) {
             uint32_t s = streamer_.sisterPosAt(j);
-            if (s < Streamer::kSisNoteOff && static_cast<size_t>(s) >= eventCursor_)
+            if (Streamer::linkIsNoteOn(s) &&
+                static_cast<size_t>(Streamer::linkPartner(s)) >= eventCursor_)
                 active_.push_back(static_cast<int>(j));
         }
         // Warm what the next frame reads (visible band, the active notes and
@@ -931,10 +935,12 @@ void Engine::applySeek(int64_t target) {
 #endif
     for (size_t j = 0; j < eventCursor_; j++) {
         const PlayEvent* e = ev[j];
-        if (e->isNoteOn() && e->sister &&
-            static_cast<int64_t>(e->sister->absMicroSec) > target) {
-            active_.push_back(static_cast<int>(j));
-            noteState_[e->param1] = static_cast<int>(j);
+        if (e->isNoteOn()) {
+            uint32_t offPos = partnerPosAt(j);
+            if (offPos != kNoEventLink && eventUsAt(offPos) > target) {
+                active_.push_back(static_cast<int>(j));
+                noteState_[e->param1] = static_cast<int>(j);
+            }
         }
     }
 
@@ -956,6 +962,14 @@ int64_t Engine::eventUsAt(size_t pos) const {
     if (streamer_.isSliced()) return streamer_.usAt(pos);
 #endif
     return midi_.events[pos]->absMicroSec;
+}
+
+uint32_t Engine::partnerPosAt(size_t pos) const {
+#ifdef APFA_STREAMING
+    if (streamer_.isOpen()) return streamer_.partnerPosAt(pos);
+#endif
+    if (pos >= midi_.events.size()) return kNoEventLink;
+    return midi_.events[pos]->link;
 }
 
 void Engine::advancePcCursor() {
