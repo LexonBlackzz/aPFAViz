@@ -97,6 +97,7 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
     // unavailable and the in-RAM parse was already predicted not to fit.
     private external fun nativeGetLoadError(): Int
     private external fun nativeGetLoadProgress(): Float
+    private external fun nativeGetProcessMemoryBytes(): Long
     private external fun nativeGetNoteCount(): Long
     private external fun nativeGetMemoryBytes(): Long
     private external fun nativeGetStreamedBytes(): Long
@@ -123,6 +124,7 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
     private val ui = Handler(Looper.getMainLooper())
 
     private lateinit var loadingText: TextView
+    private lateinit var loadingMemoryText: TextView
     private lateinit var loadingOverlay: TextView
 
     @Volatile private var copying = true
@@ -136,6 +138,7 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
     private var holdFired    = false
     private var lastStatsUpdateMs = 0L
     private var liquidGlassEnabled = true
+    private var loadPeakMemoryBytes = 0L
 
     private lateinit var transportBar: View
     private lateinit var statsPanel: TextView
@@ -224,6 +227,9 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
                             .format(nativeGetNoteCount(), mb, streamedMb)
                     else
                         "%,d notes  -  %.1f MB".format(nativeGetNoteCount(), mb)
+                    if (loadPeakMemoryBytes > 0L) {
+                        infoLine += "  -  load peak " + formatMemory(loadPeakMemoryBytes)
+                    }
                     Log.i("aPFAViz", infoLine)
                     showReadyScreen(
                         midiName = midiName,
@@ -306,6 +312,19 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
         }
         card.addView(loadingText)
 
+        loadPeakMemoryBytes = nativeGetProcessMemoryBytes().coerceAtLeast(0L)
+        loadingMemoryText = TextView(this).apply {
+            setTextColor(Color.rgb(45, 212, 191))
+            textSize = 12f
+            gravity = Gravity.CENTER
+            typeface = Typeface.MONOSPACE
+            text = "Process RAM  --"
+        }
+        card.addView(loadingMemoryText, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = dp(7) })
+
         val glass = liquidSurface(
             content = card,
             backdrop = backdrop,
@@ -326,10 +345,34 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
     private val loadingPoll = object : Runnable {
         override fun run() {
             if (stopped) return
-            loadingText.text = if (copying) "Copying file..."
-                else "Loading MIDI...  %d%%".format((nativeGetLoadProgress() * 100).toInt())
+            val rss = nativeGetProcessMemoryBytes().coerceAtLeast(0L)
+            if (rss > loadPeakMemoryBytes) loadPeakMemoryBytes = rss
+
+            loadingText.text = if (copying) {
+                "Copying file..."
+            } else {
+                "Loading MIDI...  %d%%".format(
+                    (nativeGetLoadProgress().coerceIn(0f, 1f) * 100).toInt()
+                )
+            }
+
+            if (::loadingMemoryText.isInitialized) {
+                loadingMemoryText.text = if (rss > 0L) {
+                    "RAM  %s   •   Peak  %s".format(
+                        formatMemory(rss), formatMemory(loadPeakMemoryBytes)
+                    )
+                } else {
+                    "RAM  unavailable"
+                }
+            }
             ui.postDelayed(this, 120)
         }
+    }
+
+    private fun formatMemory(bytes: Long): String {
+        val mb = bytes / 1048576.0
+        return if (mb < 1024.0) "%.1f MB".format(mb)
+               else "%.2f GB".format(mb / 1024.0)
     }
 
     // A load that cannot proceed has something to SAY — which storage ran out,
