@@ -750,7 +750,8 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
                 }
                 addView(content, FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.MATCH_PARENT
+                    if (interactive) ViewGroup.LayoutParams.MATCH_PARENT
+                    else ViewGroup.LayoutParams.WRAP_CONTENT
                 ))
             }
         }
@@ -777,7 +778,8 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
             elevation = dp(12).toFloat()
             addView(content, FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT
+                if (interactive) ViewGroup.LayoutParams.MATCH_PARENT
+                else ViewGroup.LayoutParams.WRAP_CONTENT
             ))
         }
     }
