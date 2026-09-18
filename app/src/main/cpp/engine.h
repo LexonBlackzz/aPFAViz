@@ -78,7 +78,7 @@ public:
     void start(void* surface);
     void stop();
     void surfaceChanged(int w, int h);
-    void pause()  { paused_ = true; }
+    void pause()  { paused_ = true; pubNps_.store(0.0f); }
     void resume() { paused_ = false; }
     void seek(int64_t micros);
     void setBgColor(uint32_t bgrColor) { bgColor_.store(bgrColor); }
