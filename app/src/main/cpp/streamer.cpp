@@ -50,7 +50,7 @@ namespace {
 constexpr size_t kPageSize   = 4096;
 constexpr size_t kBufEvents  = 131072;   // pass-B write buffer (~9 MB)
 constexpr size_t kEventSize  = sizeof(PlayEvent);
-constexpr size_t kRunEntries = 2097152;  // sort-run spill threshold (32 MB)
+constexpr size_t kRunEntries = 2097152;  // sort-run spill threshold (~24 MB)
 constexpr size_t kPairBufEntries = 1048576;  // pair spill threshold (8 MB)
 constexpr size_t kMergeBudget = 64 << 20;    // total merge read-buffer RAM
 
@@ -616,8 +616,10 @@ struct EmitSink {
             static_cast<uint8_t>(c), static_cast<uint8_t>(kNoteOff), 0
         };
         uint32_t offIdx = emit(e, t, tick, kNoteOff);
-        pairBuf.push_back({ onIdx, offIdx });
-        if (chunked && pairBuf.size() >= kPairBufEntries) spillPairs();
+        if (encodeIdx) {
+            pairBuf.push_back({ onIdx, offIdx });
+            if (chunked && pairBuf.size() >= kPairBufEntries) spillPairs();
+        }
 
         uint64_t us64 = tickToUs(tick);
         if (us64 > 0xFFFFFFFFull) us64 = 0xFFFFFFFFull;
@@ -1016,9 +1018,9 @@ bool Streamer::open(const std::string& midiPath, MidiData& out,
         const size_t tbl = totalEvents * sizeof(uint32_t);
         std::vector<WorkBlock> b;
         b.push_back({ totalEvents * sizeof(PlayEvent*), true });  // events[]
-        b.push_back({ tbl, true });                               // sisterPos_
-        b.push_back({ tbl, true });                               // inv[]
         if (slicedShape) {
+            b.push_back({ tbl, true });                           // sisterPos_
+            b.push_back({ tbl, true });                           // inv[]
             b.push_back({ tbl, true });                           // poolIdx_
             b.push_back({ tbl, true });                           // posUs_
         }
@@ -1267,9 +1269,11 @@ bool Streamer::open(const std::string& midiPath, MidiData& out,
     // single byte is written. Refuse now rather than strand the phone at 0 B
     // free three passes in.
     uint64_t predictedDiskBytes = poolBytes_;
-    if (chunked)
-        predictedDiskBytes += totalEvents * sizeof(SortKey) +
-                              static_cast<uint64_t>(skim.noteCount) * sizeof(Pair);
+    if (chunked) {
+        predictedDiskBytes += totalEvents * sizeof(SortKey);
+        if (sliced)
+            predictedDiskBytes += static_cast<uint64_t>(skim.noteCount) * sizeof(Pair);
+    }
     // A sliced load keeps two materialised slices alongside the pool, each at
     // most one arena's worth. That is the whole extra storage cost of slicing,
     // however long the song is.
@@ -1312,10 +1316,12 @@ bool Streamer::open(const std::string& midiPath, MidiData& out,
     emit.sampleTrackOff.push_back(0);
     if (chunked) {
         emit.runBuf.reserve(kRunEntries);
-        emit.pairBuf.reserve(kPairBufEntries);
-        emit.runsFd  = makePoolTemp("runs",  &runsPath);
-        emit.pairsFd = makePoolTemp("pairs", &pairsPath);
-        if (emit.runsFd < 0 || emit.pairsFd < 0) {
+        emit.runsFd = makePoolTemp("runs", &runsPath);
+        if (sliced) {
+            emit.pairBuf.reserve(kPairBufEntries);
+            emit.pairsFd = makePoolTemp("pairs", &pairsPath);
+        }
+        if (emit.runsFd < 0 || (sliced && emit.pairsFd < 0)) {
             LOGE("streamer: spill temp files failed in %s (errno=%d)", dir.c_str(), errno);
             if (emit.runsFd >= 0) ::close(emit.runsFd);
             if (emit.pairsFd >= 0) ::close(emit.pairsFd);
@@ -1325,11 +1331,10 @@ bool Streamer::open(const std::string& midiPath, MidiData& out,
             return false;
         }
     } else {
-        // Un-chunked: hold everything for pass D in RAM up front. This IS the
-        // deliberate ceiling (16 B/event + 8 B/note transient); past it the
-        // engine routes to chunked mode or refuses.
+        // Un-chunked: only the time-order key table is universal. Note-pair
+        // metadata is needed solely by the 32-bit sliced path.
         emit.runBuf.reserve(totalEvents);
-        emit.pairBuf.reserve(skim.noteCount);
+        if (sliced) emit.pairBuf.reserve(skim.noteCount);
     }
 
     int maxTrackB = 0;
@@ -1337,7 +1342,7 @@ bool Streamer::open(const std::string& midiPath, MidiData& out,
     emit.flush();
     if (chunked) {
         emit.spillRun();
-        emit.spillPairs();
+        if (sliced) emit.spillPairs();
     } else {
         // One whole-table sort in place of the run spills — same comparator,
         // so the merged and un-merged orders are byte-identical.
@@ -1507,12 +1512,15 @@ bool Streamer::open(const std::string& midiPath, MidiData& out,
     }
     progress.store(0.80f);
 
-    // ---- sisterPos: inverse map (transient) + pairs (resident or streamed) ----
-    {
+    // ---- sliced-only partner positions --------------------------------------
+    // Full-pool streaming can dereference PlayEvent::link directly, so it no
+    // longer pays for Pair + inv + sisterPos. Sliced mode cannot map arbitrary
+    // historical events and still needs the compact global partner table.
+    if (sliced) {
         std::vector<uint32_t> inv(totalEvents);
         for (size_t pos = 0; pos < totalEvents; pos++)
-            inv[sliced ? poolIdx_[pos] : poolOffOf(out.events[pos]) / kEventSize] =
-                static_cast<uint32_t>(pos);
+            inv[poolIdx_[pos]] = static_cast<uint32_t>(pos);
+
         sisterPos_.assign(totalEvents, kLinkNonNote);
         if (!chunked) {
             for (const Pair& pr : emit.pairBuf) {
@@ -1521,8 +1529,7 @@ bool Streamer::open(const std::string& midiPath, MidiData& out,
                 sisterPos_[onPos]  = offPos;
                 sisterPos_[offPos] = kLinkNoteOffFlag | onPos;
             }
-            emit.pairBuf.clear();
-            emit.pairBuf.shrink_to_fit();
+            std::vector<Pair>().swap(emit.pairBuf);
         } else {
             std::vector<Pair> chunk(kPairBufEntries);
             uint64_t done = 0;
@@ -1550,7 +1557,7 @@ bool Streamer::open(const std::string& midiPath, MidiData& out,
     }
     if (emit.pairsFd >= 0) {
         ::close(emit.pairsFd); emit.pairsFd = -1;
-        releaseTemp(pairsPath);           // sisterPos is built — same
+        releaseTemp(pairsPath);
     }
     progress.store(0.92f);
 
@@ -2483,20 +2490,21 @@ void Streamer::loaderTickLocked(int64_t t) {
     if (newFront > frontPos_) frontPos_ = newFront;
 
     // Back-edge scan: note-ons leaving the window that are STILL sounding
-    // (their off is ahead of the playhead) get pinned — the O(P) note-off
-    // scan and buildVisible keep reading them until the off dispatches.
+    // get pinned until their direct end timestamp. No partner-position table is
+    // needed for the normal full-pool path.
     size_t newBack = std::min(coarsePosOf(t - backUs_), n);
     for (size_t pos = backPos_; pos < newBack; pos++) {
-        uint32_t s = sisterPos_[pos];
-        if (linkIsNoteOn(s) && static_cast<size_t>(linkPartner(s)) > curPos) {
-            uintptr_t page = reinterpret_cast<uintptr_t>(ev[pos]) & ~(kPageSize - 1);
-            uintptr_t page2 = (reinterpret_cast<uintptr_t>(ev[pos]) + kEventSize - 1)
+        const PlayEvent* e = ev[pos];
+        if (e && e->isNoteOn() && static_cast<int64_t>(e->link) > t) {
+            const uint32_t endUs = e->link;
+            uintptr_t page = reinterpret_cast<uintptr_t>(e) & ~(kPageSize - 1);
+            uintptr_t page2 = (reinterpret_cast<uintptr_t>(e) + kEventSize - 1)
                               & ~(kPageSize - 1);
             auto& rel = pinnedPages_[page];
-            if (linkPartner(s) > rel) rel = linkPartner(s);
+            if (endUs > rel) rel = endUs;
             if (page2 != page) {
                 auto& rel2 = pinnedPages_[page2];
-                if (linkPartner(s) > rel2) rel2 = linkPartner(s);
+                if (endUs > rel2) rel2 = endUs;
             }
         }
     }
@@ -2551,7 +2559,7 @@ void Streamer::loaderTickLocked(int64_t t) {
     // Pins: drop the completed ones, keep the rest warm (a re-touch after our
     // own DONTNEED costs one 4K read; there are few pins).
     for (auto it = pinnedPages_.begin(); it != pinnedPages_.end();) {
-        if (static_cast<size_t>(it->second) <= curPos) {
+        if (static_cast<int64_t>(it->second) <= t) {
             it = pinnedPages_.erase(it);
         } else {
             (void)*const_cast<volatile uint8_t*>(
@@ -2603,16 +2611,17 @@ void Streamer::warmSeek(int64_t targetUs, int64_t visibleEndUs,
         size_t pos = static_cast<size_t>(posInt);
         const uint8_t* on = reinterpret_cast<const uint8_t*>(ev[pos]);
         touchRange(on, on + kEventSize - 1);
-        uint32_t s = sisterPos_[pos];
-        if (linkIsNoteOn(s)) {
+        const PlayEvent* e = ev[pos];
+        if (e && e->isNoteOn()) {
+            const uint32_t endUs = e->link;
             uintptr_t page = reinterpret_cast<uintptr_t>(on) & ~(kPageSize - 1);
             uintptr_t page2 = (reinterpret_cast<uintptr_t>(on) + kEventSize - 1)
                               & ~(kPageSize - 1);
             auto& rel = pinnedPages_[page];
-            if (linkPartner(s) > rel) rel = linkPartner(s);
+            if (endUs > rel) rel = endUs;
             if (page2 != page) {
                 auto& rel2 = pinnedPages_[page2];
-                if (linkPartner(s) > rel2) rel2 = linkPartner(s);
+                if (endUs > rel2) rel2 = endUs;
             }
         }
     }
