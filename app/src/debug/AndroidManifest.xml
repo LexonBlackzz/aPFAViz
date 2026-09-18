@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Debug builds only: lets `adb shell am start` launch playback directly with
+     extras, so a MIDI can be loaded from the CLI instead of through the picker.
+     Never present in a release build. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <application>
+        <activity
+            android:name=".PlaybackActivity"
+            android:exported="true"
+            tools:replace="android:exported" />
+    </application>
+</manifest>
