@@ -36,6 +36,8 @@ import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
+import com.example.liquidglass.GlassMaterial
+import com.example.liquidglass.LiquidGlassView
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -231,7 +233,6 @@ class MainActivity : Activity() {
         val openCard = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(16), dp(16), dp(16))
-            background = shellCardBackground(accented = true)
             elevation = dp(7).toFloat()
         }
         openCard.addView(TextView(this).apply {
@@ -252,7 +253,8 @@ class MainActivity : Activity() {
         }
         styleShellButton(midiButton, primary = true)
         openCard.addView(midiButton, LinearLayout.LayoutParams(mp, dp(56)).apply { topMargin = dp(18) })
-        page.addView(openCard, LinearLayout.LayoutParams(mp, wc))
+        page.addView(glassPanel(openCard, bg, accented = true),
+            LinearLayout.LayoutParams(mp, wc))
 
         // Recent files use the persisted SAF URI grants; no duplicate metadata scan.
         val recents = loadRecentMidis()
@@ -264,8 +266,7 @@ class MainActivity : Activity() {
             val recentCard = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 setPadding(dp(8), dp(8), dp(8), dp(8))
-                background = shellCardBackground(accented = false)
-            }
+                }
             recents.forEachIndexed { index, item ->
                 val row = TextView(this).apply {
                     text = item.name
@@ -285,7 +286,7 @@ class MainActivity : Activity() {
                     setBackgroundColor(Color.argb(38, 255, 255, 255))
                 }, LinearLayout.LayoutParams(mp, dp(1)))
             }
-            page.addView(recentCard)
+            page.addView(glassPanel(recentCard, bg))
         }
 
         // Compact SoundFont chip row.
@@ -325,7 +326,7 @@ class MainActivity : Activity() {
             textSize = 24f
             gravity = Gravity.CENTER
         }, LinearLayout.LayoutParams(dp(28), dp(48)))
-        page.addView(sfRow)
+        page.addView(glassPanel(sfRow, bg, cornerDp = 18))
 
         // Quick settings: exact value is tappable; slider retains fast tuning.
         page.addView(sectionTitle("Quick settings"), LinearLayout.LayoutParams(mp, wc).apply {
@@ -377,12 +378,46 @@ class MainActivity : Activity() {
             textSize = 24f
         })
         quick.addView(bgRow, LinearLayout.LayoutParams(mp, wc))
-        page.addView(quick)
+        page.addView(glassPanel(quick, bg))
 
         scroll.addView(page, FrameLayout.LayoutParams(mp, wc))
         root.addView(scroll, FrameLayout.LayoutParams(mp, mp))
         return root
     }
+
+    private fun glassPanel(
+        content: View,
+        backdrop: View,
+        accented: Boolean = false,
+        cornerDp: Int = 22
+    ): LiquidGlassView =
+        LiquidGlassView(this).apply {
+            cornerRadius = dp(cornerDp).toFloat()
+            material = GlassMaterial.REGULAR
+            blurAmount = if (accented) 0.11f else 0.085f
+            saturation = 118f
+            refractionHeight = dp(if (accented) 24 else 18).toFloat()
+            bevelWidth = dp(18).toFloat()
+            refractionFalloff = 2.4f
+            dispersionStrength = if (accented) 0.10f else 0.065f
+            enableSensorHighlight = false
+            enableAdaptiveTint = false
+            enablePressEffect = false
+            collectFrameStats = false
+            // These panels sit inside a ScrollView, so their position over the
+            // wallpaper changes while scrolling. Dynamic capture keeps the lens
+            // aligned with that backdrop; playback never uses this path.
+            enableDynamicBackground = true
+            backdropSource = backdrop
+            setGlassTint(
+                if (accented) uiAccent else Color.rgb(18, 21, 32),
+                if (accented) 0.12f else 0.28f
+            )
+            addView(content, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ))
+        }
 
     private fun addVoiceControl(parent: LinearLayout) {
         val header = LinearLayout(this).apply {
