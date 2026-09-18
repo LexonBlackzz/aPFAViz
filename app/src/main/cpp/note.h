@@ -27,6 +27,8 @@ namespace apfa {
 
 // PFA MIDIChannelEvent::ChannelEventType (MIDI.h:215).
 // Full set: mirrors every channel event type PFA handles.
+static constexpr uint32_t kNoEventLink = 0xFFFFFFFFu;
+
 enum ChannelEventType {
     kNoteOff          = 0x8,
     kNoteOn           = 0x9,
@@ -138,7 +140,3 @@ inline void defaultPalettePFA(uint32_t palette[16]) {
         hsvToRgbPFA(360 * i / iColors, S, V, R, G, B);
         palette[count] = packRGB(R, G, B);
     }
-    std::swap(palette[2], palette[4]);   // PFA swaps slots 2 and 4
-}
-
-}  // namespace apfa
