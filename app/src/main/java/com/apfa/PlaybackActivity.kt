@@ -59,6 +59,7 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
         const val EXTRA_BG_COLOR = "bgColor"
         const val EXTRA_BG_IMAGE = "bgImage"
         const val EXTRA_LEGACY   = "legacyRenderer"   // ES2 "Legacy Renderer (GLES 2.0)"
+        const val EXTRA_LIQUID_GLASS = "liquidGlass"
         const val EXTRA_STREAM   = "diskStreaming"    // allow the chunked pagefile sort
                                                       // (key name kept for settings compat)
         const val EXTRA_SD_POOL  = "sdPagefile"       // put the pagefile on the SD card
@@ -134,6 +135,7 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
     private var uiHidden     = false
     private var holdFired    = false
     private var lastStatsUpdateMs = 0L
+    private var liquidGlassEnabled = true
 
     private lateinit var transportBar: View
     private lateinit var statsPanel: TextView
@@ -159,6 +161,7 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
         val bgColor    = intent.getIntExtra(EXTRA_BG_COLOR, 0x00464646)
         val bgImage    = intent.getStringExtra(EXTRA_BG_IMAGE)
         val legacy     = intent.getBooleanExtra(EXTRA_LEGACY, false)
+        liquidGlassEnabled = intent.getBooleanExtra(EXTRA_LIQUID_GLASS, true)
         val chunked    = intent.getBooleanExtra(EXTRA_STREAM, false)
         val sdPagefile = intent.getBooleanExtra(EXTRA_SD_POOL, false)
 
@@ -644,8 +647,30 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
         strength: Float,
         cornerDp: Int,
         interactive: Boolean
-    ): LiquidGlassView =
-        LiquidGlassView(this).apply {
+    ): View {
+        if (!liquidGlassEnabled) {
+            return FrameLayout(this).apply {
+                val alpha = if (interactive) 255 else 235
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.RECTANGLE
+                    cornerRadius = dp(cornerDp).toFloat()
+                    setColor(Color.argb(
+                        alpha, Color.red(tint), Color.green(tint), Color.blue(tint)
+                    ))
+                    setStroke(
+                        dp(1),
+                        if (interactive) Color.argb(155, 255, 255, 255)
+                        else Color.argb(72, 255, 255, 255)
+                    )
+                }
+                addView(content, FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                ))
+            }
+        }
+
+        return LiquidGlassView(this).apply {
             cornerRadius = dp(cornerDp).toFloat()
             material = GlassMaterial.REGULAR
             blurAmount = 0.13f
@@ -671,6 +696,7 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
                 ViewGroup.LayoutParams.MATCH_PARENT
             ))
         }
+    }
 
     private fun animateGlassIn(view: View, delayMs: Long) {
         view.alpha = 0f
