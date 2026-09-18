@@ -782,18 +782,10 @@ void Engine::dispatch() {
                 ++noteOnsWindow_;
             } else {
                 synth_.noteOff(ch, key);
-                noteState_[key] = -1;
-                const uint32_t onPos = partnerPosAt(eventCursor_);
-                size_t i = 0;
-                while (i < active_.size()) {
-                    PlayEvent* a = ev[active_[i]];
-                    if (static_cast<uint32_t>(active_[i]) == onPos) {
-                        active_.erase(active_.begin() + static_cast<long>(i));
-                    } else {
-                        if (a->param1 == key) noteState_[key] = active_[i];
-                        i++;
-                    }
-                }
+                // Do not scan/erase active_ here. On dense passages this used to
+                // walk and memmove the active-note vector once PER note-off,
+                // turning dispatch into O(noteOffs * polyphony). After all due
+                // events are dispatched we perform one stable O(P) compaction.
             }
             eventCursor_++;
         }
@@ -811,6 +803,26 @@ void Engine::dispatch() {
         break;
 #endif
     }
+    // Stable active-note compaction once per frame.
+    //
+    // eventCursor_ is now the first un-dispatched event. A note-on remains
+    // sounding iff its paired note-off position is >= eventCursor_. Keeping
+    // survivors in their original order preserves the exact active rendering
+    // order. Rebuilding noteState_ here yields the same "last active note for
+    // each key" result the old per-note-off scans produced.
+    for (int& state : noteState_) state = -1;
+    size_t write = 0;
+    for (size_t read = 0; read < active_.size(); read++) {
+        const int pos = active_[read];
+        const uint32_t offPos = partnerPosAt(static_cast<size_t>(pos));
+        if (offPos == kNoEventLink || static_cast<size_t>(offPos) < eventCursor_)
+            continue;
+        active_[write++] = pos;
+        const PlayEvent* a = ev[static_cast<size_t>(pos)];
+        noteState_[a->param1] = pos;
+    }
+    active_.resize(write);
+
     dispEvents_ += eventCursor_ - startCursor;
 }
 
