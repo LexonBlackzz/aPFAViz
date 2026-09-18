@@ -16,20 +16,17 @@
 
 namespace apfa {
 
-// Per-instance note record the engine produces. 28 bytes — keep this layout
-// (and order) in lockstep with RendererES3's hardcoded note-VAO offsets
-// (renderer_es3.cpp, stride 28). RendererES2 copies this into its own
-// keyX/keyW-augmented NoteInstanceES2 (renderer_es2.h) at draw time, because
-// GLSL ES 1.00 cannot dynamically index a per-key uniform array.
+// Compact visible-note record. White/sharp layering is already split into
+// separate vectors by Engine::buildVisible, and the dark/very-dark shades are
+// fixed 0.6x/0.2x RGB variants of the primary color, so the shaders derive them
+// instead of uploading two redundant colors per note.
 struct NoteInstance {
     float    startSec;
     float    durSec;
     float    key;          // MIDI key 0..127
     uint32_t colorPrimary;
-    uint32_t colorDark;
-    uint32_t colorVeryDark;
-    uint32_t isSharp;
 };
+static_assert(sizeof(NoteInstance) == 16, "NoteInstance must stay 16 bytes");
 
 struct RectInstance {
     float    x, y, w, h;   // normalised [0..1], y=bottom in GL
