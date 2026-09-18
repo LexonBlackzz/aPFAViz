@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.RectF
 import android.util.AttributeSet
 import android.view.MotionEvent
@@ -96,6 +97,7 @@ class GlassPlaybackSeekBar @JvmOverloads constructor(
     private val shadowRect = RectF()
     private val highlightRect = RectF()
     private val innerRect = RectF()
+    private val clipPath = Path()
 
     init {
         isClickable = true
@@ -157,7 +159,14 @@ class GlassPlaybackSeekBar @JvmOverloads constructor(
         // Re-draw the track inside the capsule slightly lower and brighter.
         // That discontinuity is the local "lens" cue, with no backdrop capture.
         val save = canvas.save()
-        canvas.clipRoundRect(thumbRect, h * 0.5f, h * 0.5f)
+        clipPath.reset()
+        clipPath.addRoundRect(
+            thumbRect,
+            h * 0.5f,
+            h * 0.5f,
+            Path.Direction.CW
+        )
+        canvas.clipPath(clipPath)
         val lensY = cy + dp(0.8f)
         val lensH = dp(7f)
 
