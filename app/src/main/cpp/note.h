@@ -1,8 +1,8 @@
 // note.h — compact playback event representation.
 //
-// aPFA originally mirrored PFA's MIDIChannelEvent object field-for-field. That
+// aPFAViz originally mirrored PFA's MIDIChannelEvent object field-for-field. That
 // made every event 72 bytes on arm64 before the 8-byte time-order pointer table.
-// aPFAViz deliberately keeps PFA's playback semantics but not that object bloat:
+// aPFAVizViz deliberately keeps PFA's playback semantics but not that object bloat:
 // every runtime event is 16 bytes, naturally aligned, and carries only data the
 // player actually reads.
 //
@@ -16,7 +16,7 @@
 //   compact position-link table for playback/slicing).
 //
 // absMicroSec is 32-bit because the parser already clamps every event timestamp
-// to UINT32_MAX; this does not reduce the range aPFA supported before.
+// to UINT32_MAX; this does not reduce the range aPFAViz supported before.
 #pragma once
 
 #include <cstdint>
@@ -95,7 +95,7 @@ inline uint32_t packHSV(float h, float s, float v) {
 // clock (PianoFromAbove.cpp:43), so each load is "inherently random" past channel
 // 16 — see [[apfa-synth-fidelity-reference]] for the fidelity ethos.
 //
-// PFA stores colours as Windows COLORREF 0x00BBGGRR; aPFA's GL vertex attribute
+// PFA stores colours as Windows COLORREF 0x00BBGGRR; aPFAViz's GL vertex attribute
 // wants memory-order R,G,B,A. The byte layout is identical (R=bit0, G=bit8,
 // B=bit16) — we just force A=0xFF so the note geometry is opaque.
 
