@@ -22,6 +22,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <time.h>
 #include "platform.h"
 #include "parallel_load.h"
 
@@ -56,6 +57,13 @@ struct Reader {
         if (p + n > end) { p = end; ok = false; } else { p += n; }
     }
 };
+
+uint64_t parserMonoUs() {
+    timespec ts{};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return static_cast<uint64_t>(ts.tv_sec) * 1000000ull +
+           static_cast<uint64_t>(ts.tv_nsec / 1000);
+}
 
 struct TempoEvent { uint32_t tick; uint32_t usPerQuarter; };
 struct TempoSeg   { uint32_t tick; uint64_t usAtTick; uint32_t usPerQuarter; };
@@ -286,6 +294,7 @@ bool readHeaderAndTracks(const uint8_t* base, const uint8_t* fileEnd,
 }  // namespace
 
 MidiPreScan scanMidi(const std::string& path, std::atomic<float>& progress) {
+    const uint64_t phaseStart = parserMonoUs();
     MidiPreScan scan;
     progress = 0.0f;
 
@@ -339,16 +348,17 @@ MidiPreScan scanMidi(const std::string& path, std::atomic<float>& progress) {
     if (scan.eventCount > 0xFFFFFFFFull) scan.valid = false;
     munmap(map, fileSize);
 
-    LOGI("scanMidi: %zu tracks, %llu events, %llu notes, %u worker(s)",
+    LOGI("scanMidi: %zu tracks, %llu events, %llu notes, %u worker(s), %.1f ms",
          scan.tracks.size(),
          static_cast<unsigned long long>(scan.eventCount),
          static_cast<unsigned long long>(scan.noteCount),
-         workers);
+         workers, (parserMonoUs() - phaseStart) / 1000.0);
     return scan;
 }
 
 MidiData parseMidi(const std::string& path, std::atomic<float>& progress,
                    uint64_t expectedEvents, const MidiPreScan* preScan) {
+    const uint64_t parseStartUs = parserMonoUs();
     MidiData out;
 
     MidiPreScan ownedScan;
@@ -435,6 +445,8 @@ MidiData parseMidi(const std::string& path, std::atomic<float>& progress,
         }
     }
 
+    const uint64_t tracksDoneUs = parserMonoUs();
+
     // Rebuild the tempo input in exactly the old track-major discovery order.
     std::vector<TempoEvent> tempos;
     size_t tempoCount = 0;
@@ -508,6 +520,7 @@ MidiData parseMidi(const std::string& path, std::atomic<float>& progress,
             }
         }, 4);
     progress = 0.70f;
+    const uint64_t convertDoneUs = parserMonoUs();
 
     // K-way merge the already-time-monotonic track slices directly into the
     // FINAL events[] array. No global comparison sort and no second N-sized
@@ -577,6 +590,7 @@ MidiData parseMidi(const std::string& path, std::atomic<float>& progress,
         return MidiData{};
     }
     progress = 0.88f;
+    const uint64_t mergeDoneUs = parserMonoUs();
 
     for (size_t i = 0; i < out.events.size(); ++i) {
         if (out.events[i]->isProgramChange() ||
@@ -609,10 +623,16 @@ MidiData parseMidi(const std::string& path, std::atomic<float>& progress,
     progress = 1.0f;
 
     munmap(map, fileSize);
-    LOGI("parseMidi: parallel scan/parse=%u, convert=%u; %zu notes, "
-         "%zu events, %d tracks, %.1f s, %.1f MB",
-         parseWorkers, convertWorkers, out.noteCount(), out.eventPool.size(),
-         out.trackCount, out.totalUs / 1e6, out.memoryBytes() / 1048576.0);
+    LOGI("parseMidi: workers parse=%u convert=%u | track parse %.1f ms | "
+         "convert/link %.1f ms | k-way merge %.1f ms | total %.1f ms",
+         parseWorkers, convertWorkers,
+         (tracksDoneUs - parseStartUs) / 1000.0,
+         (convertDoneUs - tracksDoneUs) / 1000.0,
+         (mergeDoneUs - convertDoneUs) / 1000.0,
+         (parserMonoUs() - parseStartUs) / 1000.0);
+    LOGI("parseMidi: %zu notes, %zu events, %d tracks, %.1f s, %.1f MB",
+         out.noteCount(), out.eventPool.size(), out.trackCount,
+         out.totalUs / 1e6, out.memoryBytes() / 1048576.0);
     return out;
 }
 
