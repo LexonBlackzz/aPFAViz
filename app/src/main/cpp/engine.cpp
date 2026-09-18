@@ -786,11 +786,10 @@ void Engine::dispatch() {
     size_t write = 0;
     for (size_t read = 0; read < active_.size(); read++) {
         const int pos = active_[read];
-        const uint32_t offPos = partnerPosAt(static_cast<size_t>(pos));
-        if (offPos == kNoEventLink || static_cast<size_t>(offPos) < eventCursor_)
+        const PlayEvent* a = ev[static_cast<size_t>(pos)];
+        if (static_cast<int64_t>(a->link) <= clockUs_)
             continue;
         active_[write++] = pos;
-        const PlayEvent* a = ev[static_cast<size_t>(pos)];
         noteState_[a->param1] = pos;
     }
     active_.resize(write);
@@ -836,9 +835,7 @@ void Engine::buildVisible() {
         const PlayEvent& e = *ev[pos];
         NoteInstance ni;
         ni.startSec = e.absMicroSec * 1e-6f;
-        uint32_t partner = partnerPosAt(pos);
-        int64_t endUs = (partner != kNoEventLink) ? eventUsAt(partner)
-                                                  : static_cast<int64_t>(e.absMicroSec);
+        const int64_t endUs = static_cast<int64_t>(e.link);
         ni.durSec = static_cast<float>(endUs - static_cast<int64_t>(e.absMicroSec)) * 1e-6f;
         ni.key    = static_cast<float>(e.param1);
         size_t colorIdx = colorIndexOf(e);
@@ -949,12 +946,9 @@ void Engine::applySeek(int64_t target) {
 #endif
     for (size_t j = 0; j < eventCursor_; j++) {
         const PlayEvent* e = ev[j];
-        if (e->isNoteOn()) {
-            uint32_t offPos = partnerPosAt(j);
-            if (offPos != kNoEventLink && eventUsAt(offPos) > target) {
-                active_.push_back(static_cast<int>(j));
-                noteState_[e->param1] = static_cast<int>(j);
-            }
+        if (e->isNoteOn() && static_cast<int64_t>(e->link) > target) {
+            active_.push_back(static_cast<int>(j));
+            noteState_[e->param1] = static_cast<int>(j);
         }
     }
 
@@ -978,13 +972,6 @@ int64_t Engine::eventUsAt(size_t pos) const {
     return midi_.events[pos]->absMicroSec;
 }
 
-uint32_t Engine::partnerPosAt(size_t pos) const {
-#ifdef APFA_STREAMING
-    if (streamer_.isOpen()) return streamer_.partnerPosAt(pos);
-#endif
-    if (pos >= midi_.events.size()) return kNoEventLink;
-    return midi_.events[pos]->link;
-}
 
 void Engine::advancePcCursor() {
     const std::vector<size_t>& pcIdx = midi_.programChangeIdx;
