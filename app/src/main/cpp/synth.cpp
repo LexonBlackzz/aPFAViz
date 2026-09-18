@@ -59,6 +59,8 @@ bool Synth::init(int voiceLimit, int sampleRate) {
         LOGE("BASS_MIDI_StreamCreate failed: %d", BASS_ErrorGetCode());
         return false;
     }
+    rawBatch_.clear();
+    rawBatch_.reserve(kRawBatchBytes);
     setVoiceLimit(voiceLimit);
     voiceCeiling_.store(voiceLimit < 1 ? 1 : voiceLimit);
     voiceCurrent_.store(voiceLimit < 1 ? 1 : voiceLimit);
