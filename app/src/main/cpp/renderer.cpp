@@ -833,7 +833,7 @@ void RendererES2::renderKeyboard(const uint32_t keyColor[128]) {
 
     // PFA KBPercent = 0.25 → keyboard occupies bottom 25% of screen height.
     // In PFA: fKeysY = m_fNotesY + m_fNotesCY = height of notes area top (in screen pixels, y down).
-    // In aPFA: keyboard is at the bottom. fKeysY_px = top of keyboard in pixel-y-down coords.
+    // In aPFAViz: keyboard is at the bottom. fKeysY_px = top of keyboard in pixel-y-down coords.
     float fKeysCY  = H * kbFrac_;
     float fKeysY   = H - fKeysCY;   // top of keyboard in screen px (y downward)
 
