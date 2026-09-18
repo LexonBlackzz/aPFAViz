@@ -2,6 +2,7 @@
 #include "engine.h"
 #include "note.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <new>
@@ -503,3 +504,539 @@ void Engine::threadMain() {
     } else if (!engineAvoidApplied) {
         LOGE("could not read core frequencies — engine left unpinned");
     }
+#elif defined(__APPLE__)
+    // No per-core affinity on iOS. Bias this engine thread onto the performance
+    // cluster via QoS — the strongest placement control the OS allows. BASS's
+    // audio render runs on CoreAudio's own real-time I/O thread, so there is no
+    // render thread here to "avoid" the way the Android pin strategy does.
+    apfa::platform::setEngineThreadPolicy();
+    LOGI("engine thread QoS = USER_INTERACTIVE (performance-cluster bias)");
+#endif
+
+    // PFA's 3-second pre-roll: the clock starts 3s before the first note and
+    // counts up through "-0:03.0" to 0 before any note fires (GameState.cpp:155,
+    // m_llStartTime = llFirstNote - 3000000).
+    clockUs_     = firstNoteUs_ - 3000000;
+    eventCursor_ = windowCursor_ = pcCursor_ = 0;
+#ifdef APFA_STREAMING
+    // A surface re-attach reuses the open streamer, which may still be sitting
+    // on the slice that was playing. The cursors just went back to 0, so the
+    // mapping has to as well — unless the resume seek below is about to move
+    // both anyway, in which case rewinding first would only build a slice to
+    // throw it straight away.
+    if (streamer_.isSliced() && !hasResume_) streamer_.seekSlice(0, clockUs_);
+#endif
+#ifdef APFA_STREAMING
+    // Read-ahead thread: warms pool pages ahead of the published clock, kept
+    // off the engine core like the BASS render threads. The 3-second pre-roll
+    // doubles as the initial warm-up headroom.
+    if (streamer_.isOpen()) {
+#if defined(__ANDROID__)
+        uint64_t loaderAvoid = engineMask;
+#else
+        uint64_t loaderAvoid = 0;
+#endif
+        streamer_.startLoader(&pubTimeUs_, clockUs_, loaderAvoid);
+    }
+#endif
+    active_.clear();
+    active_.reserve(16384);
+    for (int& s : noteState_) s = -1;
+    lastWall_ = fpsLastUs_ = nowUs();
+    cpuLastUs_ = nowThreadCpuUs();
+    // Baseline the fault counters here, not at zero: the load itself faults
+    // heavily, and counting that against the first playing window would read as
+    // a phantom spike right where the answer matters.
+    majFltLast_ = threadMajFlt();
+    ldrFltLast_ = 0;
+#ifdef APFA_STREAMING
+    ldrFltLast_ = streamer_.loaderMajFlt();
+#endif
+    polySum_ = polyMax_ = dispEvents_ = 0;
+    noteOnsWindow_ = 0;
+    pubActiveNotes_.store(0);
+    pubNps_.store(0.0f);
+    pubPeakNps_.store(0.0f);
+    playing_ = true;
+#ifdef APFA_STREAMING
+    clearLoadMarker();   // load + startup survived: this MIDI fits this mode
+#endif
+    LOGI("engine playing: %zu notes", midi_.noteCount());
+
+    // Re-attaching to a fresh surface (returned from recents): pick up where we
+    // left off instead of replaying the pre-roll. applySeek rebuilds the visible
+    // notes and restores synth instrument/CC state at that position.
+    if (hasResume_) {
+        applySeek(resumeUs_);
+        lastWall_ = nowUs();
+        hasResume_ = false;
+    }
+
+    bool synthPlaying = true;
+    while (running_.load()) {
+        int64_t seekTo = seekRequest_.exchange(INT64_MIN);
+        if (seekTo != INT64_MIN) {
+            applySeek(seekTo);
+            lastWall_ = nowUs();
+        }
+
+        if (paused_.load()) {
+            if (synthPlaying) { synth_.pause(); synthPlaying = false; }
+            // Still render the paused frame (seek may have moved the view),
+            // then sleep — mirroring PFA's paused Logic()/Render() path.
+            buildVisible();
+            int sw = surfW_.load(), sh = surfH_.load();
+            if (sw > 0 && sh > 0) renderer_->resize(sw, sh);
+            renderer_->setBgColor(bgColor_.load());
+            syncBgImage();
+            renderer_->render(clockUs_ * 1e-6f, midi_.totalUs * 1e-6f, pubFps_.load(),
+                             3.0f * noteSpeed_, whiteInstances_, sharpInstances_, keyColor_);
+            usleep(10000);   // 10 ms idle — matches PFA's paused Sleep(10)
+            lastWall_ = nowUs();
+            continue;
+        }
+        if (!synthPlaying) { synth_.resume(); synthPlaying = true; }
+        frame();
+    }
+
+#ifdef APFA_STREAMING
+    streamer_.stopLoader();   // the mapping itself stays for a surface re-attach
+#endif
+    renderer_->destroyEGL();
+    synth_.shutdown();
+    playing_ = false;
+}
+
+void Engine::frame() {
+    // --- one-frame-delayed clock ---
+    // Advance by the previous frame's wall time, which now includes
+    // eglSwapBuffers — exactly as PFA's clock advances by the time including
+    // D3D Present(). GPU cost on slow hardware stretches the frame faithfully.
+    uint64_t now     = nowUs();
+    uint64_t elapsed = now - lastWall_;
+    lastWall_ = now;
+    if (eventCursor_ < midi_.events.size()) clockUs_ += static_cast<int64_t>(elapsed);
+
+    uint64_t tDisp = nowUs();
+    dispatch();
+    advancePcCursor();
+    synth_.flush();   // one/few bounded raw BASS submissions for the frame
+    uint64_t tBuild = nowUs();
+    buildVisible();
+    uint64_t tEnd = nowUs();
+
+    uint64_t dUs = tBuild - tDisp, bUs = tEnd - tBuild;
+    sumDispatchUs_ += dUs;  if (dUs > maxDispatchUs_) maxDispatchUs_ = dUs;
+    sumBuildUs_    += bUs;  if (bUs > maxBuildUs_)    maxBuildUs_    = bUs;
+
+    // Render + present — on the engine thread, so the swap stall enters the
+    // next frame's clock advance (one-frame-delayed, same as PFA).
+    int sw = surfW_.load(), sh = surfH_.load();
+    if (sw > 0 && sh > 0) renderer_->resize(sw, sh);
+    renderer_->setBgColor(bgColor_.load());
+    syncBgImage();
+    renderer_->render(clockUs_ * 1e-6f, midi_.totalUs * 1e-6f,
+                     pubFps_.load(),
+                     3.0f * noteSpeed_, whiteInstances_, sharpInstances_, keyColor_);
+    // eglSwapBuffers is called inside renderer_->render(); it stalls here until
+    // vblank. That stall is part of lastWall_ -> now on the next frame.
+    uint64_t tPresented = nowUs();
+    uint64_t rUs = tPresented - tEnd;
+    sumRenderUs_ += rUs;
+    if (rUs > maxRenderUs_) maxRenderUs_ = rUs;
+    size_t visibleNow = whiteInstances_.size() + sharpInstances_.size();
+    visibleSum_ += visibleNow;
+    if (visibleNow > visibleMax_) visibleMax_ = visibleNow;
+
+    // --- metrics ---
+    pubTimeUs_.store(static_cast<int64_t>(clockUs_));
+    pubActiveNotes_.store(static_cast<int>(active_.size()));
+    fpsFrames_++;
+    polySum_ += active_.size();
+    if (active_.size() > polyMax_) polyMax_ = active_.size();
+    if (now - fpsLastUs_ >= 500000) {
+#if defined(__ANDROID__)
+        // Re-assert the engine pin (see threadMain): One UI strips per-thread
+        // affinity mid-session. One syscall per 500 ms — not the hot path.
+        if (pinnedMask_ != 0) setThreadAffinityMask(pinnedMask_);
+#endif
+        uint64_t wallNow  = nowUs();
+        uint64_t cpuNow   = nowThreadCpuUs();
+        uint64_t window   = wallNow - fpsLastUs_;
+        uint64_t cpuDelta = cpuNow  - cpuLastUs_;
+        fpsLastUs_ = wallNow;
+        cpuLastUs_ = cpuNow;
+        float fps = fpsFrames_ * 1e6f / static_cast<float>(window);
+        pubFps_.store(fps);
+        float nps = noteOnsWindow_ * 1e6f / static_cast<float>(window);
+        pubNps_.store(nps);
+        float peak = pubPeakNps_.load();
+        if (nps > peak) pubPeakNps_.store(nps);
+        int frames = fpsFrames_;
+        fpsFrames_ = 0;
+        uint64_t sc = 0, su = 0, bp = 0;
+        synth_.sampleEventCost(sc, su, bp);
+        LOGI("perf: %.0f fps | engine %.0f%% cpu | synth %llu events / %llu batches, %.1f ms submit (%.1f%% wall)",
+             pubFps_.load(), cpuDelta * 100.0 / static_cast<double>(window),
+             static_cast<unsigned long long>(sc),
+             static_cast<unsigned long long>(bp),
+             su / 1000.0, su * 100.0 / static_cast<double>(window));
+        double inv = frames > 0 ? 1.0 / frames : 0.0;
+        // Only when the overload guard actually had to thin the audio — a
+        // silent log here means BASSMIDI kept up on its own.
+        int gVoices = 0, gFloor = 0;
+        synth_.sampleGuard(gVoices, gFloor);
+        if (gFloor < voiceCount_)
+            LOGI("guard: voices %d now, %d low this window (ceiling %d)",
+                 gVoices, gFloor, voiceCount_);
+        LOGI("frame: dispatch %.1f/%.1f | build %.1f/%.1f | render %.1f/%.1f ms avg/max",
+             sumDispatchUs_ * inv / 1000.0, maxDispatchUs_ / 1000.0,
+             sumBuildUs_    * inv / 1000.0, maxBuildUs_    / 1000.0,
+             sumRenderUs_   * inv / 1000.0, maxRenderUs_   / 1000.0);
+        LOGI("visible: %llu avg | %zu max",
+             static_cast<unsigned long long>(frames > 0 ? visibleSum_ / frames : 0),
+             visibleMax_);
+        // Twin of PFA's PerfLog "state:" line — same columns, same order.
+        LOGI("state: poly %llu avg %llu max | %.0f ev/s",
+             static_cast<unsigned long long>(frames > 0 ? polySum_ / frames : 0),
+             static_cast<unsigned long long>(polyMax_),
+             dispEvents_ * 1e6 / static_cast<double>(window));
+        uint64_t majNow = threadMajFlt();
+        uint64_t ldrNow = 0;
+#ifdef APFA_STREAMING
+        ldrNow = streamer_.loaderMajFlt();
+#endif
+        LOGI("fault: engine %llu maj | loader %llu maj | per %.0f ms",
+             static_cast<unsigned long long>(majNow - majFltLast_),
+             static_cast<unsigned long long>(ldrNow - ldrFltLast_),
+             window / 1000.0);
+        majFltLast_ = majNow;
+        ldrFltLast_ = ldrNow;
+#ifdef APFA_STREAMING
+        // The read-ahead window as it actually stands this tick: the horizon
+        // in force after the MemAvailable shrink, what that horizon prices out
+        // at, and the MemAvailable it was priced against. Reading "win:"
+        // alongside "fault:" says whether an engine stall is the window losing
+        // its budget or just the storage being slow.
+        if (streamer_.isOpen())
+            LOGI("win: front %.2f s | %.1f MB priced | %.0f MB avail",
+                 streamer_.windowFrontUs() / 1e6,
+                 streamer_.windowBytes() / 1048576.0,
+                 streamer_.memAvailBytes() / 1048576.0);
+#endif
+        sumDispatchUs_ = sumBuildUs_ = sumRenderUs_ = 0;
+        maxDispatchUs_ = maxBuildUs_ = maxRenderUs_ = 0;
+        visibleSum_ = 0;
+        visibleMax_ = 0;
+        polySum_ = polyMax_ = dispEvents_ = 0;
+        noteOnsWindow_ = 0;
+    }
+}
+
+void Engine::dispatch() {
+    const std::vector<PlayEvent*>& ev = midi_.events;
+    const size_t n = ev.size();
+    const size_t startCursor = eventCursor_;
+#ifdef APFA_STREAMING
+    // A sliced load (32-bit, SLICED-POOL-DESIGN.md) has only one slice mapped
+    // at a time, so the walk stops at its transition point and picks up in the
+    // next slice. dispatchEnd() is n in every other case, which is what the
+    // loop below has always been bounded by.
+    size_t limit = streamer_.isSliced() ? streamer_.dispatchEnd() : n;
+#else
+    const size_t limit = n;
+#endif
+    for (;;) {
+        while (eventCursor_ < limit &&
+               ev[eventCursor_]->absMicroSec <= static_cast<int64_t>(clockUs_)) {
+            PlayEvent* e = ev[eventCursor_];
+            int ch  = e->channel;
+            int key = e->param1;
+            if (e->isNonNote()) {
+                synth_.sendRaw(static_cast<uint8_t>(e->eventCode), e->param1, e->param2);
+            } else if (e->isNoteOn()) {
+                synth_.noteOn(ch, key, e->param2);
+                active_.push_back(static_cast<int>(eventCursor_));
+                noteState_[key] = static_cast<int>(eventCursor_);
+                ++noteOnsWindow_;
+            } else {
+                synth_.noteOff(ch, key);
+                // Do not scan/erase active_ here. On dense passages this used to
+                // walk and memmove the active-note vector once PER note-off,
+                // turning dispatch into O(noteOffs * polyphony). After all due
+                // events are dispatched we perform one stable O(P) compaction.
+            }
+            eventCursor_++;
+        }
+#ifdef APFA_STREAMING
+        // The playhead has run out of mapped slice. Bring the next one in —
+        // blocking if the builder is behind, which is ordinary storage lag
+        // entering the clock exactly as a major fault is — and carry on.
+        // active_ and noteState_ need no rebuilding: the notes sounding across
+        // the boundary ARE the next slice's carry-in, so installing it
+        // repoints precisely the entries they hold.
+        if (eventCursor_ < limit || limit >= n) break;
+        if (!streamer_.advanceSlice(static_cast<int64_t>(clockUs_))) break;
+        limit = streamer_.dispatchEnd();
+#else
+        break;
+#endif
+    }
+    // Stable active-note compaction once per frame.
+    //
+    // eventCursor_ is now the first un-dispatched event. A note-on remains
+    // sounding iff its paired note-off position is >= eventCursor_. Keeping
+    // survivors in their original order preserves the exact active rendering
+    // order. Rebuilding noteState_ here yields the same "last active note for
+    // each key" result the old per-note-off scans produced.
+    for (int& state : noteState_) state = -1;
+    size_t write = 0;
+    for (size_t read = 0; read < active_.size(); read++) {
+        const int pos = active_[read];
+        const PlayEvent* a = ev[static_cast<size_t>(pos)];
+        if (static_cast<int64_t>(a->link) <= clockUs_)
+            continue;
+        active_[write++] = pos;
+        noteState_[a->param1] = pos;
+    }
+    active_.resize(write);
+
+    dispEvents_ += eventCursor_ - startCursor;
+}
+
+void Engine::buildVisible() {
+    const std::vector<PlayEvent*>& ev     = midi_.events;
+    const std::vector<uint32_t>&   colors = midi_.trackColors;
+    const size_t n = ev.size();
+
+    int64_t windowUs  = static_cast<int64_t>(3000000.0 * noteSpeed_);
+    int64_t windowEnd = static_cast<int64_t>(clockUs_) + windowUs;
+
+    if (windowCursor_ < eventCursor_) windowCursor_ = eventCursor_;
+#ifdef APFA_STREAMING
+    // readEnd() is n unless this is a sliced load, where the slice is
+    // materialised one full front horizon past its transition point precisely
+    // so this cursor has somewhere to go.
+    const size_t visEnd = streamer_.isSliced() ? streamer_.readEnd() : n;
+#else
+    const size_t visEnd = n;
+#endif
+    while (windowCursor_ < visEnd && ev[windowCursor_]->absMicroSec < windowEnd)
+        windowCursor_++;
+
+    auto colorIndexOf = [&](const PlayEvent& e) -> size_t {
+        return static_cast<size_t>(e.track) * 16 + e.channel;
+    };
+    auto colorOf = [&](const PlayEvent& e) -> uint32_t {
+        size_t idx = colorIndexOf(e);
+        return idx < colors.size() ? colors[idx] : 0xFFFFFFFFu;
+    };
+
+    // Sharp key detection: C#,D#,F#,G#,A# — pitch class 1,3,6,8,10
+    auto isSharpKey = [](int key) -> bool {
+        int pc = key % 12;
+        return pc==1||pc==3||pc==6||pc==8||pc==10;
+    };
+
+    auto toInstance = [&](size_t pos) -> NoteInstance {
+        const PlayEvent& e = *ev[pos];
+        NoteInstance ni;
+        ni.startSec = e.absMicroSec * 1e-6f;
+        const int64_t endUs = static_cast<int64_t>(e.link);
+        ni.durSec = static_cast<float>(endUs - static_cast<int64_t>(e.absMicroSec)) * 1e-6f;
+        ni.key    = static_cast<float>(e.param1);
+        size_t colorIdx = colorIndexOf(e);
+        ni.colorPrimary = colorIdx < colors.size() ? colors[colorIdx] : 0xFFFFFFFFu;
+        return ni;
+    };
+
+    whiteInstances_.clear();
+    sharpInstances_.clear();
+    memset(keyColor_, 0, sizeof(keyColor_));
+
+    auto appendInstance = [&](size_t pos) {
+        const PlayEvent& e = *ev[pos];
+        NoteInstance ni = toInstance(pos);
+        if (isSharpKey(e.param1)) sharpInstances_.push_back(ni);
+        else                      whiteInstances_.push_back(ni);
+    };
+
+    for (int idx : active_)
+        appendInstance(static_cast<size_t>(idx));
+    for (int k = 0; k < 128; k++)
+        if (noteState_[k] >= 0)
+            keyColor_[k] = colorOf(*ev[noteState_[k]]);
+    for (size_t j = eventCursor_; j < windowCursor_; j++) {
+        const PlayEvent* e = ev[j];
+        if (e->isNoteOn()) appendInstance(j);
+    }
+}
+
+void Engine::seek(int64_t micros) {
+    // Don't clamp here — applySeek does it against the live bounds (matching
+    // PFA's JumpTo). Negative targets are valid: they land in the pre-roll.
+    seekRequest_.store(micros);
+}
+
+void Engine::applySeek(int64_t target) {
+    // Clamp to [minTimeUs, maxTimeUs], exactly as PFA's JumpTo:
+    // m_llStartTime = min(max(llStartTime, llFirstTime), llLastTime)
+    // (GameState.cpp:1454). The lower bound is the -3s pre-roll, so scrubbing
+    // to the start shows "-0:03" instead of snapping to 0:00.
+    if (target < minTimeUs()) target = minTimeUs();
+    if (target > maxTimeUs()) target = maxTimeUs();
+    const std::vector<PlayEvent*>& ev = midi_.events;
+    const size_t n = ev.size();
+
+    clockUs_ = target;
+
+    // Binary search the first event after the target. With a pre-roll (negative)
+    // target this converges to 0, so no events have fired yet — correct.
+    size_t lo = 0;
+#ifdef APFA_STREAMING
+    if (streamer_.isSliced()) {
+        // Same search, off the resident time table: almost none of the events
+        // it would walk are mapped.
+        lo = streamer_.posForTime(target);
+    } else
+#endif
+    {
+        size_t hi = n;
+        while (lo < hi) {
+            size_t mid = (lo + hi) / 2;
+            if (static_cast<int64_t>(ev[mid]->absMicroSec) <= target) lo = mid + 1;
+            else hi = mid;
+        }
+    }
+    eventCursor_  = lo;
+    windowCursor_ = lo;
+
+    active_.clear();
+    for (int& s : noteState_) s = -1;
+#ifdef APFA_STREAMING
+    // Map the slice that owns the target before anything dereferences events[].
+    // A seek outside the mapped slice is a rebuild, i.e. a pause — a deliberate
+    // stall for a deliberate action. If the rebuild fails (the volume filled up
+    // under us is the realistic way) there is NOTHING mapped, so park the
+    // cursors at the end rather than dereference: dispatchEnd()/readEnd() are
+    // then 0 and the frame draws an empty screen instead of taking a wild
+    // pointer.
+    if (streamer_.isSliced() && !streamer_.seekSlice(lo, target)) {
+        LOGE("seek -> %.1f s: no slice could be mapped — playback stops here",
+             target * 1e-6);
+        eventCursor_ = windowCursor_ = n;
+        synth_.allNotesOff();
+        pubTimeUs_.store(static_cast<int64_t>(clockUs_));
+        return;
+    }
+    if (streamer_.isOpen()) {
+        // Identical result to the loop below, computed from the resident
+        // sister-position table instead of dereferencing every historical
+        // event (which would fault the whole cold pool in random order).
+        // A note-on at position j is still sounding iff its note-off sits at
+        // position >= lo: events[] is time-sorted, so "off position >= lo"
+        // and "off time > target" are the same predicate.
+        for (size_t j = 0; j < eventCursor_; j++) {
+            uint32_t s = streamer_.sisterPosAt(j);
+            if (Streamer::linkIsNoteOn(s) &&
+                static_cast<size_t>(Streamer::linkPartner(s)) >= eventCursor_)
+                active_.push_back(static_cast<int>(j));
+        }
+        // Warm what the next frame reads (visible band, the active notes and
+        // their offs) before the param1 dereferences below.
+        streamer_.warmSeek(target,
+                           target + static_cast<int64_t>(3000000.0 * noteSpeed_),
+                           active_);
+        for (int j : active_)
+            noteState_[ev[j]->param1] = j;
+    } else
+#endif
+    for (size_t j = 0; j < eventCursor_; j++) {
+        const PlayEvent* e = ev[j];
+        if (e->isNoteOn() && static_cast<int64_t>(e->link) > target) {
+            active_.push_back(static_cast<int>(j));
+            noteState_[e->param1] = static_cast<int>(j);
+        }
+    }
+
+    synth_.allNotesOff();
+    
+    size_t oldPcCursor = pcCursor_;
+    advancePcCursor();
+    playSkippedEvents(oldPcCursor);
+    synth_.flush();
+
+    pubTimeUs_.store(static_cast<int64_t>(clockUs_));
+    LOGI("seek -> %.1f s, %zu active", target * 1e-6, active_.size());
+}
+
+// Event time without touching the pool. Identical to
+// midi_.events[pos]->absMicroSec, except that a sliced load answers from the
+// resident table — the position is very often outside the mapped slice.
+int64_t Engine::eventUsAt(size_t pos) const {
+#ifdef APFA_STREAMING
+    if (streamer_.isSliced()) return streamer_.usAt(pos);
+#endif
+    return midi_.events[pos]->absMicroSec;
+}
+
+
+void Engine::advancePcCursor() {
+    const std::vector<size_t>& pcIdx = midi_.programChangeIdx;
+    // Signed compare: clockUs_ is negative during the pre-roll, so an unsigned
+    // cast here would wrap and wrongly advance past every program change.
+    while (pcCursor_ < pcIdx.size() && eventUsAt(pcIdx[pcCursor_]) <= clockUs_) {
+        pcCursor_++;
+    }
+}
+
+void Engine::playSkippedEvents(size_t oldPcCursor) {
+    if (oldPcCursor == pcCursor_) return;
+
+    // The three bytes that get replayed. A sliced load takes them from the
+    // streamer's resident table: this walks every controller event behind the
+    // playhead, and in a sliced load essentially none of them are mapped.
+    // eventCode carries both the channel (low nibble) and the type (high), the
+    // same two the PlayEvent fields were read from.
+    struct Raw { uint8_t code, param1, param2; };
+    auto rawAt = [&](size_t i) -> Raw {
+#ifdef APFA_STREAMING
+        if (streamer_.isSliced()) {
+            Streamer::PcEvent p = streamer_.pcEventAt(i);
+            return Raw{ p.code, p.param1, p.param2 };
+        }
+#endif
+        const PlayEvent* e = midi_.events[midi_.programChangeIdx[i]];
+        return Raw{ static_cast<uint8_t>(e->eventCode), e->param1, e->param2 };
+    };
+
+    bool aControl[16][128] = {false};
+    bool aProgram[16] = {false};
+    bool aPitch[16] = {false};
+    std::vector<Raw> vControl;
+
+    size_t endIdx = 0;
+    if (oldPcCursor < pcCursor_) endIdx = oldPcCursor;
+
+    for (size_t i = pcCursor_; i > endIdx; i--) {
+        Raw e = rawAt(i - 1);
+        int ch   = e.code & 0x0F;
+        int type = e.code >> 4;
+        if (type == kController && !aControl[ch][e.param1]) {
+            aControl[ch][e.param1] = true;
+            vControl.push_back(e);
+        } else if (type == kProgramChange && !aProgram[ch]) {
+            aProgram[ch] = true;
+            synth_.sendRaw(e.code, e.param1, e.param2);
+        } else if (type == kPitchBend && !aPitch[ch]) {
+            aPitch[ch] = true;
+            synth_.sendRaw(e.code, e.param1, e.param2);
+        }
+    }
+
+    // Play controller events in chronological order
+    for (auto it = vControl.rbegin(); it != vControl.rend(); ++it)
+        synth_.sendRaw(it->code, it->param1, it->param2);
+}
+
+}  // namespace apfa
