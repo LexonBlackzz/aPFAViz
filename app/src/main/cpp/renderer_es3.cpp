@@ -1056,7 +1056,8 @@ void RendererES3::renderKeyboard(const uint32_t keyColor[128]) {
 
 void RendererES3::render(float clockSec, float totalSec, float fps,
                       float windowSec,
-                      const std::vector<NoteInstance>& notes,
+                      const std::vector<NoteInstance>& whiteNotes,
+                      const std::vector<NoteInstance>& sharpNotes,
                       const uint32_t keyColor[128]) {
     if (!valid()) return;
 
@@ -1144,7 +1145,9 @@ void RendererES3::render(float clockSec, float totalSec, float fps,
     }
 
     // ---- note field — whites first, then sharps on top (PFA layering) ----
-    if (!notes.empty()) {
+    // Engine::buildVisible already split these in its single event walk, so the
+    // renderer no longer rescans/copies the entire visible set twice.
+    if (!whiteNotes.empty() || !sharpNotes.empty()) {
         glUseProgram(noteProg_);
         glUniform1f(glGetUniformLocation(noteProg_, "uClockSec"), clockSec);
         glUniform1f(glGetUniformLocation(noteProg_, "uWindowSec"),
@@ -1164,29 +1167,20 @@ void RendererES3::render(float clockSec, float totalSec, float fps,
         }
         glUniform1f(glGetUniformLocation(noteProg_, "uWhiteKeyPx"), whiteKeyPx);
         pBindVertexArray_(noteVao_);
+        glBindBuffer(GL_ARRAY_BUFFER, instVbo_);
 
-        // Pass 1: white key notes
-        notesScratch_.clear();
-        for (const auto& n : notes)
-            if (n.isSharp == 0) notesScratch_.push_back(n);
-        if (!notesScratch_.empty()) {
-            glBindBuffer(GL_ARRAY_BUFFER, instVbo_);
+        if (!whiteNotes.empty()) {
             glBufferData(GL_ARRAY_BUFFER,
-                         notesScratch_.size() * sizeof(NoteInstance),
-                         notesScratch_.data(), GL_DYNAMIC_DRAW);
-            pDrawArraysInstanced_(GL_TRIANGLE_STRIP, 0, 4, (GLsizei)notesScratch_.size());
+                         whiteNotes.size() * sizeof(NoteInstance),
+                         whiteNotes.data(), GL_DYNAMIC_DRAW);
+            pDrawArraysInstanced_(GL_TRIANGLE_STRIP, 0, 4, (GLsizei)whiteNotes.size());
         }
 
-        // Pass 2: sharp key notes on top
-        notesScratch_.clear();
-        for (const auto& n : notes)
-            if (n.isSharp != 0) notesScratch_.push_back(n);
-        if (!notesScratch_.empty()) {
-            glBindBuffer(GL_ARRAY_BUFFER, instVbo_);
+        if (!sharpNotes.empty()) {
             glBufferData(GL_ARRAY_BUFFER,
-                         notesScratch_.size() * sizeof(NoteInstance),
-                         notesScratch_.data(), GL_DYNAMIC_DRAW);
-            pDrawArraysInstanced_(GL_TRIANGLE_STRIP, 0, 4, (GLsizei)notesScratch_.size());
+                         sharpNotes.size() * sizeof(NoteInstance),
+                         sharpNotes.data(), GL_DYNAMIC_DRAW);
+            pDrawArraysInstanced_(GL_TRIANGLE_STRIP, 0, 4, (GLsizei)sharpNotes.size());
         }
     }
 
