@@ -612,7 +612,7 @@ void Engine::threadMain() {
             renderer_->setBgColor(bgColor_.load());
             syncBgImage();
             renderer_->render(clockUs_ * 1e-6f, midi_.totalUs * 1e-6f, pubFps_.load(),
-                             3.0f * noteSpeed_, instances_, keyColor_);
+                             3.0f * noteSpeed_, whiteInstances_, sharpInstances_, keyColor_);
             usleep(10000);   // 10 ms idle — matches PFA's paused Sleep(10)
             lastWall_ = nowUs();
             continue;
@@ -659,7 +659,7 @@ void Engine::frame() {
     syncBgImage();
     renderer_->render(clockUs_ * 1e-6f, midi_.totalUs * 1e-6f,
                      pubFps_.load(),
-                     3.0f * noteSpeed_, instances_, keyColor_);
+                     3.0f * noteSpeed_, whiteInstances_, sharpInstances_, keyColor_);
     // eglSwapBuffers is called inside renderer_->render(); it stalls here until
     // vblank. That stall is part of lastWall_ -> now on the next frame.
 
@@ -854,17 +854,24 @@ void Engine::buildVisible() {
         return ni;
     };
 
-    instances_.clear();
+    whiteInstances_.clear();
+    sharpInstances_.clear();
     memset(keyColor_, 0, sizeof(keyColor_));
 
+    auto appendInstance = [&](size_t pos) {
+        NoteInstance ni = toInstance(pos);
+        if (ni.isSharp) sharpInstances_.push_back(ni);
+        else            whiteInstances_.push_back(ni);
+    };
+
     for (int idx : active_)
-        instances_.push_back(toInstance(static_cast<size_t>(idx)));
+        appendInstance(static_cast<size_t>(idx));
     for (int k = 0; k < 128; k++)
         if (noteState_[k] >= 0)
             keyColor_[k] = colorOf(*ev[noteState_[k]]);
     for (size_t j = eventCursor_; j < windowCursor_; j++) {
         const PlayEvent* e = ev[j];
-        if (e->isNoteOn()) instances_.push_back(toInstance(j));
+        if (e->isNoteOn()) appendInstance(j);
     }
 }
 
