@@ -1,11 +1,10 @@
 // streamer.h — file-backed event pool: identical layout, kernel-managed residency.
 //
-// The 72-byte PlayEvent pool is aPFA's memory floor: Tau-class MIDIs (6.28M
-// notes) commit ~1 GB of pool + pointer table, all of it load-bearing for the
-// crash behaviour (note.h). This streamer keeps THE SAME pool — same struct,
-// same parse order, same virtual addresses relative to the pool base, same
-// sister pointers, same time-sorted events[] walk — but backs it with a
-// read-only file mapping instead of anonymous RAM:
+// The event pool is file-backed so giant MIDIs do not require the whole song
+// resident in anonymous RAM. aPFAViz uses the same 16-byte PlayEvent layout in
+// both the in-RAM and streaming paths. The time-sorted events[] walk and event
+// ordering are unchanged; integer partner-position metadata replaces runtime
+// sister pointers.
 //
 //   1. The parse writes the pool to a temp file in PARSE order (track by
 //      track), with absMicroSec already in µs and `sister` holding the real
@@ -167,10 +166,21 @@ inline size_t poolOffIn(const std::vector<PoolSeg>& segs, const void* p) {
 
 class Streamer {
 public:
-    // sisterPos values for non-note events and note-offs. Everything below
-    // kSisNoteOff is a note-on whose value is its note-off's events[] position.
-    static constexpr uint32_t kSisNonNote = 0xFFFFFFFFu;
-    static constexpr uint32_t kSisNoteOff = 0xFFFFFFFEu;
+    // Compact per-position note link table. The top bit marks note-offs;
+    // note-ons store the matching note-off position directly. Non-note events
+    // use 0xFFFFFFFF. This gives both directions in one 4-byte table.
+    static constexpr uint32_t kLinkNonNote = 0xFFFFFFFFu;
+    static constexpr uint32_t kLinkNoteOffFlag = 0x80000000u;
+    static constexpr uint32_t kLinkPosMask = 0x7FFFFFFFu;
+
+    static bool linkIsNonNote(uint32_t v) { return v == kLinkNonNote; }
+    static bool linkIsNoteOff(uint32_t v) {
+        return v != kLinkNonNote && (v & kLinkNoteOffFlag) != 0;
+    }
+    static bool linkIsNoteOn(uint32_t v) {
+        return v != kLinkNonNote && (v & kLinkNoteOffFlag) == 0;
+    }
+    static uint32_t linkPartner(uint32_t v) { return v & kLinkPosMask; }
 
     ~Streamer() { close(); }
 
@@ -288,11 +298,13 @@ public:
     // BEFORE committing to it — 0 on failure/empty.
     static uint64_t predictEventCount(const std::string& midiPath);
 
-    // For events[] position `pos`: kSisNonNote, kSisNoteOff, or (for a
-    // note-on) the events[] position of its note-off. Lets applySeek rebuild
-    // active_ without dereferencing the pool for every historical event
-    // (which would fault the entire cold file in random order).
+    // Raw compact link metadata for an events[] position. This stays resident
+    // even when the backing event page is cold or, in sliced mode, unmapped.
     uint32_t sisterPosAt(size_t pos) const { return sisterPos_[pos]; }
+    uint32_t partnerPosAt(size_t pos) const {
+        uint32_t v = sisterPos_[pos];
+        return linkIsNonNote(v) ? kLinkNonNote : linkPartner(v);
+    }
 
     // How far ahead of the playhead the engine actually reads: buildVisible's
     // 3.0s * noteSpeed band. The front horizon is this plus kLeadUs, so the
@@ -446,7 +458,7 @@ private:
     std::vector<std::string> tempPaths_;
 
     // ---- resident tables ----
-    std::vector<uint32_t>    sisterPos_;     // per events[] position (see above)
+    std::vector<uint32_t>    sisterPos_;     // compact bidirectional link metadata
     std::vector<TrackRange>  trackRange_;    // pool-index span per track
     std::vector<uint32_t>    trackSampleOff_;// per-track offset into trackSamples_
     std::vector<TrackSample> trackSamples_;  // every kTrackSampleStep events
