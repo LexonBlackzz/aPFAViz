@@ -71,17 +71,18 @@ void Engine::syncBgImage() {
 // Fraction of total device RAM allowed for the predicted permanent in-RAM
 // event representation. A second fixed soft cap matters on high-RAM phones:
 // "40% of 8 GB" is technically available, but letting a Black MIDI parser peak
-// near a gigabyte is still unfriendly to Android and especially bad precedent
-// for older devices.
+// beyond a gigabyte is still unfriendly to Android. Low-memory devices remain
+// protected by the stricter 40%-of-physical-RAM limit below.
 static constexpr double   kStreamRamFraction      = 0.40;
-static constexpr uint64_t kInRamResidentSoftCap  = 256ull << 20;
+static constexpr uint64_t kInRamResidentSoftCap  = 1ull << 30;
 
 // Automatic streaming-sort spill threshold. SortKey is 12 B/event and Pair is
 // 8 B/note (~4 B/event for note-heavy files), so ~16 B/event is a good upper
-// estimate of the purely temporary resident sort/pair payload. Above 192 MB,
-// spill it even if the manual Chunked Disk Streaming switch is off.
+// estimate of the purely temporary resident sort/pair payload. Prefer RAM for
+// speed until the scratch itself approaches 1 GB; the device-relative budget
+// below still forces chunking much earlier on low-memory phones.
 static constexpr uint64_t kSortScratchPerEvent    = 16;
-static constexpr uint64_t kAutoChunkScratchCap    = 192ull << 20;
+static constexpr uint64_t kAutoChunkScratchCap    = 1ull << 30;
 
 // Peak non-pool cost of an UN-chunked streaming parse, per event. This includes
 // permanent tables that overlap the sort plus the transient sort/pair payload.
