@@ -1,9 +1,8 @@
-// synth.h — BASS + BASSMIDI wrapper, immediate raw call path.
+// synth.h — BASS + BASSMIDI wrapper, bounded raw-MIDI batch path.
 //
-// noteOn/noteOff call BASS_MIDI_StreamEvents(BASS_MIDI_EVENTS_RAW) immediately
-// on the engine thread, one event per call, using raw 3-byte MIDI messages.
-// Raw format avoids the struct decode overhead — same bytes OmniMIDI feeds
-// BASSMIDI via SendDirectData. Timing is identical to the previous direct path.
+// noteOn/noteOff preserve each MIDI message in order in an engine-thread buffer.
+// The existing frame flush submits those bytes to BASSMIDI in <=64 KiB chunks,
+// avoiding one library/API call per Black-MIDI event while retaining every event.
 #pragma once
 
 #include <atomic>
