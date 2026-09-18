@@ -36,8 +36,8 @@ add_library(apfa SHARED
 # rather than inside the streaming gate below: the in-RAM parse allocates the
 # same size of table and retains it the same way.
 
-# Streaming event pool (file-backed 72-byte pool behind a sliding window —
-# streamer.h) is part of the stock Android build; the runtime gate is
+# Streaming event pool (file-backed 16-byte compact event pool behind a sliding
+# window — streamer.h) is part of the stock Android build; the runtime gate is
 # Engine::load's adaptive check (RAM-fit prediction / crash marker / user
 # toggle). The macro stays a macro so iOS builds, which never define it,
 # keep the pure in-RAM parse.
