@@ -4,7 +4,7 @@ project(apfa LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# BASS / BASSMIDI roots, relative to this file (aPFA/app/src/main/cpp).
+# BASS / BASSMIDI roots, relative to this file (aPFAViz/app/src/main/cpp).
 set(BASS_DIR     ${CMAKE_CURRENT_SOURCE_DIR}/../../../../bass24-android)
 set(BASSMIDI_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../../../bassmidi24-android)
 
@@ -17,7 +17,7 @@ add_library(bassmidi SHARED IMPORTED)
 set_target_properties(bassmidi PROPERTIES
     IMPORTED_LOCATION ${BASSMIDI_DIR}/libs/${ANDROID_ABI}/libbassmidi.so)
 
-# The aPFA engine. Both renderers are compiled in: renderer.cpp = RendererES2
+# The aPFAViz engine. Both renderers are compiled in: renderer.cpp = RendererES2
 # (ES2 baseline, also the iOS renderer) and renderer_es3.cpp = RendererES3 (the
 # Android default). createRenderer() picks one at runtime per the Legacy toggle.
 add_library(apfa SHARED
