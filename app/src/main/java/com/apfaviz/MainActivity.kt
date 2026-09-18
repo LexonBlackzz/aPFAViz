@@ -238,7 +238,7 @@ class MainActivity : Activity() {
                 dp(if (portrait) 16 else 28),
                 dp(16),
                 dp(if (portrait) 16 else 28),
-                dp(118)
+                dp(28)
             )
         }
 
@@ -429,20 +429,6 @@ class MainActivity : Activity() {
 
         scroll.addView(page, FrameLayout.LayoutParams(mp, wc))
         root.addView(scroll, FrameLayout.LayoutParams(mp, mp))
-
-        val bottomRail = buildBottomActionRail(scroll)
-        root.addView(bottomRail, FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            dp(72)
-        ).apply {
-            gravity = Gravity.BOTTOM
-            setMargins(
-                dp(if (portrait) 16 else 28),
-                0,
-                dp(if (portrait) 16 else 28),
-                dp(14)
-            )
-        })
 
         scroll.viewTreeObserver.addOnScrollChangedListener {
             shellGlassPanels.forEach { it.invalidate() }
@@ -797,102 +783,6 @@ class MainActivity : Activity() {
         button.stateListAnimator = null
         button.elevation = if (primary) dp(5).toFloat() else dp(2).toFloat()
         if (!compact) button.setPadding(dp(16), 0, dp(16), 0)
-    }
-
-    private fun buildBottomActionRail(backdrop: View): View {
-        val row = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(8), dp(8), dp(8), dp(8))
-        }
-
-        val sf = TextView(this).apply {
-            val name = soundfontUri?.let { displayName(it) } ?: "No SoundFont"
-            text = "SF  •  $name"
-            setTextColor(Color.WHITE)
-            textSize = 12f
-            typeface = Typeface.DEFAULT_BOLD
-            gravity = Gravity.CENTER_VERTICAL
-            maxLines = 1
-            ellipsize = android.text.TextUtils.TruncateAt.END
-            setPadding(dp(12), 0, dp(10), 0)
-            background = panelBackground(
-                Color.argb(132, 10, 30, 32), 15, Color.argb(62, 45, 212, 191)
-            )
-            isClickable = true
-            isFocusable = true
-            setOnClickListener { pickFile(REQ_SOUNDFONT) }
-        }
-        row.addView(sf, LinearLayout.LayoutParams(0, dp(52), 1f).apply {
-            marginEnd = dp(8)
-        })
-
-        val open = TextView(this).apply {
-            text = "Open MIDI"
-            setTextColor(Color.WHITE)
-            textSize = 14f
-            typeface = Typeface.DEFAULT_BOLD
-            gravity = Gravity.CENTER
-            background = shellButtonBackground(primary = true)
-            isClickable = true
-            isFocusable = true
-            setOnClickListener { pickFile(REQ_MIDI) }
-        }
-        row.addView(open, LinearLayout.LayoutParams(dp(112), dp(52)).apply {
-            marginEnd = dp(8)
-        })
-
-        val settings = TextView(this).apply {
-            text = "⚙"
-            contentDescription = "Settings"
-            setTextColor(Color.WHITE)
-            textSize = 19f
-            gravity = Gravity.CENTER
-            background = panelBackground(
-                Color.argb(122, 22, 26, 40), 15, Color.argb(68, 255, 255, 255)
-            )
-            isClickable = true
-            isFocusable = true
-            setOnClickListener { showSettingsDialog() }
-        }
-        row.addView(settings, LinearLayout.LayoutParams(dp(52), dp(52)))
-
-        if (!liquidGlassEnabled) {
-            return FrameLayout(this).apply {
-                background = panelBackground(
-                    Color.rgb(16, 19, 30), 24, Color.argb(76, 255, 255, 255)
-                )
-                elevation = dp(12).toFloat()
-                addView(row, FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.MATCH_PARENT
-                ))
-            }
-        }
-
-        return LiquidGlassView(this).apply {
-            cornerRadius = dp(24).toFloat()
-            material = GlassMaterial.REGULAR
-            blurAmount = 0.26f
-            saturation = 145f
-            refractionHeight = dp(14).toFloat()
-            bevelWidth = dp(10).toFloat()
-            refractionFalloff = 3.1f
-            dispersionStrength = 0.035f
-            enableSensorHighlight = false
-            enableAdaptiveTint = false
-            enablePressEffect = false
-            enableDynamicBackground = true
-            collectFrameStats = false
-            backdropSource = backdrop
-            setGlassTint(Color.WHITE, 0.075f)
-            elevation = dp(14).toFloat()
-            addView(row, FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT
-            ))
-            shellGlassPanels.add(this)
-        }
     }
 
     private fun resetAffordance(onReset: () -> Unit): TextView =
