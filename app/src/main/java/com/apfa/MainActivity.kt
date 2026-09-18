@@ -280,7 +280,7 @@ class MainActivity : Activity() {
                         launchPlayback()
                     }
                 }
-                recentCard.addView(row, LinearLayout.LayoutParams(mp, dp(48)))
+                recentCard.addView(row, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(48)))
                 if (index != recents.lastIndex) recentCard.addView(View(this).apply {
                     setBackgroundColor(Color.argb(38, 255, 255, 255))
                 }, LinearLayout.LayoutParams(mp, dp(1)))
@@ -415,7 +415,7 @@ class MainActivity : Activity() {
                 value.text = voiceCount.toString()
             })
         }
-        parent.addView(bar, LinearLayout.LayoutParams(mp, dp(48)))
+        parent.addView(bar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(48)))
         parent.addView(rangeLabels("1", "500"))
     }
 
@@ -450,7 +450,7 @@ class MainActivity : Activity() {
                 value.text = "%.3f×".format(noteSpeed)
             })
         }
-        parent.addView(bar, LinearLayout.LayoutParams(mp, dp(48)))
+        parent.addView(bar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(48)))
         parent.addView(rangeLabels("0.005×", "1.000×"))
     }
 
