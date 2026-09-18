@@ -33,7 +33,6 @@ import android.widget.LinearLayout
 import android.widget.RadioButton
 import android.widget.RadioGroup
 import android.widget.ScrollView
-import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
 import com.example.liquidglass.GlassMaterial
@@ -431,7 +430,7 @@ class MainActivity : Activity() {
         scroll.addView(page, FrameLayout.LayoutParams(mp, wc))
         root.addView(scroll, FrameLayout.LayoutParams(mp, mp))
 
-        val bottomRail = buildBottomActionRail(backdrop)
+        val bottomRail = buildBottomActionRail(scroll)
         root.addView(bottomRail, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             dp(72)
@@ -542,9 +541,14 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun glassValuePill(label: TextView, backdrop: View): View {
+    private fun glassValuePill(
+        label: TextView,
+        backdrop: View,
+        click: () -> Unit
+    ): View {
         // Controls inside a card stay flat; nested glass is muddy and expensive.
         label.isClickable = false
+        label.isFocusable = false
         return FrameLayout(this).apply {
             background = panelBackground(
                 Color.argb(118, 15, 52, 52), 14, Color.argb(96, 45, 212, 191)
@@ -556,7 +560,7 @@ class MainActivity : Activity() {
                 dp(40),
                 Gravity.CENTER
             ))
-            setOnClickListener { label.performClick() }
+            setOnClickListener { click() }
         }
     }
 
@@ -613,7 +617,6 @@ class MainActivity : Activity() {
             textSize = 14f
             typeface = Typeface.DEFAULT_BOLD
             setPadding(dp(12), dp(7), dp(12), dp(7))
-            setOnClickListener { showVoiceInput() }
         }
         header.addView(resetAffordance {
             voiceCount = 250
@@ -623,7 +626,7 @@ class MainActivity : Activity() {
         }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(34)).apply {
             marginEnd = dp(7)
         })
-        header.addView(glassValuePill(value, backdrop))
+        header.addView(glassValuePill(value, backdrop) { showVoiceInput() })
         parent.addView(header)
 
         val bar = LensSettingSlider(this).apply {
@@ -665,7 +668,6 @@ class MainActivity : Activity() {
             textSize = 14f
             typeface = Typeface.DEFAULT_BOLD
             setPadding(dp(12), dp(7), dp(12), dp(7))
-            setOnClickListener { showSpeedInput() }
         }
         header.addView(resetAffordance {
             noteSpeed = 0.05f
@@ -675,7 +677,7 @@ class MainActivity : Activity() {
         }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(34)).apply {
             marginEnd = dp(7)
         })
-        header.addView(glassValuePill(value, backdrop))
+        header.addView(glassValuePill(value, backdrop) { showSpeedInput() })
         parent.addView(header)
 
         val bar = LensSettingSlider(this).apply {
@@ -796,12 +798,6 @@ class MainActivity : Activity() {
         button.stateListAnimator = null
         button.elevation = if (primary) dp(5).toFloat() else dp(2).toFloat()
         if (!compact) button.setPadding(dp(16), 0, dp(16), 0)
-    }
-
-    private fun styleShellSeekBar(bar: SeekBar) {
-        val accent = ColorStateList.valueOf(uiAccent2)
-        bar.progressTintList = accent
-        bar.thumbTintList = accent
     }
 
     private fun buildBottomActionRail(backdrop: View): View {
@@ -1763,12 +1759,6 @@ class MainActivity : Activity() {
         tv.setTextColor(Color.WHITE)
         tv.textSize = 15f
         return tv
-    }
-
-    private fun simpleListener(onChange: (Int) -> Unit) = object : SeekBar.OnSeekBarChangeListener {
-        override fun onProgressChanged(sb: SeekBar?, progress: Int, fromUser: Boolean) = onChange(progress)
-        override fun onStartTrackingTouch(sb: SeekBar?) {}
-        override fun onStopTrackingTouch(sb: SeekBar?) { saveSettings() }
     }
 
     private fun loadAsset(name: String): Bitmap? = try {
