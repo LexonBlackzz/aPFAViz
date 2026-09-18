@@ -521,64 +521,83 @@ void Engine::threadMain() {
     LOGI("engine thread QoS = USER_INTERACTIVE (performance-cluster bias)");
 #endif
 
-    // PFA's 3-second pre-roll: the clock starts 3s before the first note and
-    // counts up through "-0:03.0" to 0 before any note fires (GameState.cpp:155,
-    // m_llStartTime = llFirstNote - 3000000).
+    // Start visuals at the same 3-second pre-roll, but on normal/full-pool
+    // playback the authoritative clock now belongs to the MIDI scheduler.
     clockUs_     = firstNoteUs_ - 3000000;
     eventCursor_ = windowCursor_ = pcCursor_ = 0;
+
+    bool separateAudio = true;
 #ifdef APFA_STREAMING
-    // A surface re-attach reuses the open streamer, which may still be sitting
-    // on the slice that was playing. The cursors just went back to 0, so the
-    // mapping has to as well — unless the resume seek below is about to move
-    // both anyway, in which case rewinding first would only build a slice to
-    // throw it straight away.
-    if (streamer_.isSliced() && !hasResume_) streamer_.seekSlice(0, clockUs_);
-#endif
-#ifdef APFA_STREAMING
-    // Read-ahead thread: warms pool pages ahead of the published clock, kept
-    // off the engine core like the BASS render threads. The 3-second pre-roll
-    // doubles as the initial warm-up headroom.
-    if (streamer_.isOpen()) {
-#if defined(__ANDROID__)
-        uint64_t loaderAvoid = engineMask;
-#else
-        uint64_t loaderAvoid = 0;
-#endif
-        streamer_.startLoader(&pubTimeUs_, clockUs_, loaderAvoid);
+    // Sliced 32-bit streaming remaps one event arena as playback advances.
+    // Two independent cursors could otherwise dereference a slice after the
+    // other thread replaces it, so keep the proven coupled path there.
+    if (streamer_.isSliced()) {
+        separateAudio = false;
+        if (!hasResume_) streamer_.seekSlice(0, clockUs_);
+        LOGI("MIDI scheduler: coupled fallback for sliced 32-bit pool");
     }
 #endif
+    decoupledAudio_.store(separateAudio, std::memory_order_release);
+    pubAudioTimeUs_.store(clockUs_, std::memory_order_release);
+
     active_.clear();
     active_.reserve(16384);
-    for (int& s : noteState_) s = -1;
+    for (int& state : noteState_) state = -1;
+
+    // Re-attaching to a fresh surface: rebuild the visual state BEFORE the
+    // scheduler starts, then launch audio directly at that same target.
+    if (hasResume_) {
+        applySeek(resumeUs_);
+        lastWall_ = nowUs();
+        hasResume_ = false;
+    }
+
+#if defined(__ANDROID__)
+    const uint64_t schedulerMask = avoidMask;
+#else
+    const uint64_t schedulerMask = 0;
+#endif
+    if (decoupledAudio_.load(std::memory_order_acquire))
+        startAudioScheduler(clockUs_, schedulerMask);
+
+#ifdef APFA_STREAMING
+    // Read-ahead follows the AUDIO clock when audio is decoupled. A blocked
+    // eglSwapBuffers can therefore never make storage warming trail the sound.
+    if (streamer_.isOpen()) {
+#if defined(__ANDROID__)
+        const uint64_t loaderAvoid = engineMask;
+#else
+        const uint64_t loaderAvoid = 0;
+#endif
+        const std::atomic<int64_t>* playClock =
+            decoupledAudio_.load(std::memory_order_acquire)
+                ? &pubAudioTimeUs_ : &pubTimeUs_;
+        streamer_.startLoader(playClock, clockUs_, loaderAvoid);
+    }
+#endif
+
     lastWall_ = fpsLastUs_ = nowUs();
     cpuLastUs_ = nowThreadCpuUs();
-    // Baseline the fault counters here, not at zero: the load itself faults
-    // heavily, and counting that against the first playing window would read as
-    // a phantom spike right where the answer matters.
     majFltLast_ = threadMajFlt();
     ldrFltLast_ = 0;
 #ifdef APFA_STREAMING
     ldrFltLast_ = streamer_.loaderMajFlt();
 #endif
     polySum_ = polyMax_ = dispEvents_ = 0;
+    audioSubmittedWindow_.store(0, std::memory_order_relaxed);
+    audioLateMaxUs_.store(0, std::memory_order_relaxed);
     noteOnsWindow_ = 0;
     pubActiveNotes_.store(0);
     pubNps_.store(0.0f);
     pubPeakNps_.store(0.0f);
     playing_ = true;
 #ifdef APFA_STREAMING
-    clearLoadMarker();   // load + startup survived: this MIDI fits this mode
+    clearLoadMarker();
 #endif
-    LOGI("engine playing: %zu notes", midi_.noteCount());
-
-    // Re-attaching to a fresh surface (returned from recents): pick up where we
-    // left off instead of replaying the pre-roll. applySeek rebuilds the visible
-    // notes and restores synth instrument/CC state at that position.
-    if (hasResume_) {
-        applySeek(resumeUs_);
-        lastWall_ = nowUs();
-        hasResume_ = false;
-    }
+    LOGI("engine playing: %zu notes | MIDI %s visual thread",
+         midi_.noteCount(),
+         decoupledAudio_.load(std::memory_order_acquire)
+             ? "separate from" : "coupled to");
 
     bool synthPlaying = true;
     while (running_.load()) {
@@ -588,25 +607,35 @@ void Engine::threadMain() {
             lastWall_ = nowUs();
         }
 
-        if (paused_.load()) {
-            if (synthPlaying) { synth_.pause(); synthPlaying = false; }
-            // Still render the paused frame (seek may have moved the view),
-            // then sleep — mirroring PFA's paused Logic()/Render() path.
+        if (paused_.load(std::memory_order_acquire)) {
+            if (decoupledAudio_.load(std::memory_order_acquire)) {
+                clockUs_ = pubAudioTimeUs_.load(std::memory_order_acquire);
+            } else if (synthPlaying) {
+                synth_.pause();
+                synthPlaying = false;
+            }
+            // Still render the paused frame (seek may have moved the view).
             buildVisible();
             int sw = surfW_.load(), sh = surfH_.load();
             if (sw > 0 && sh > 0) renderer_->resize(sw, sh);
             renderer_->setBgColor(bgColor_.load());
             syncBgImage();
-            renderer_->render(clockUs_ * 1e-6f, midi_.totalUs * 1e-6f, pubFps_.load(),
-                             3.0f * noteSpeed_, whiteInstances_, sharpInstances_, keyColor_);
-            usleep(10000);   // 10 ms idle — matches PFA's paused Sleep(10)
+            renderer_->render(clockUs_ * 1e-6f, midi_.totalUs * 1e-6f,
+                             pubFps_.load(), 3.0f * noteSpeed_,
+                             whiteInstances_, sharpInstances_, keyColor_);
+            pubTimeUs_.store(clockUs_, std::memory_order_release);
+            usleep(10000);
             lastWall_ = nowUs();
             continue;
         }
-        if (!synthPlaying) { synth_.resume(); synthPlaying = true; }
+        if (!decoupledAudio_.load(std::memory_order_acquire) && !synthPlaying) {
+            synth_.resume();
+            synthPlaying = true;
+        }
         frame();
     }
 
+    stopAudioScheduler();
 #ifdef APFA_STREAMING
     streamer_.stopLoader();   // the mapping itself stays for a surface re-attach
 #endif
