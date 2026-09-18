@@ -94,6 +94,10 @@ class MainActivity : Activity() {
     // renderer. Required on ES2-only GPUs (e.g. Mali-400 / MT6570) that cannot
     // create an ES3 context.
     private var legacyRenderer = false
+    // Visual-only switch. When false, no LiquidGlassView is instantiated on the
+    // launcher/settings/Ready flow; the same layout falls back to opaque rounded
+    // Android surfaces. Native playback/rendering is unaffected either way.
+    private var liquidGlassEnabled = true
     // Whether THIS process is 32-bit, which is the only case where the pool is
     // ever split into sub-2 GB files (streamer.cpp, poolFileBytes()). The APK
     // ships both ABIs, so a 64-bit device runs a 64-bit process and the device
@@ -331,10 +335,12 @@ class MainActivity : Activity() {
         val sfGlass = glassPanel(sfRow, backdrop, cornerDp = 18).apply {
             isClickable = true
             isFocusable = true
-            enablePressEffect = true
-            pressScale = 0.99f
-            elasticity = 0.48f
             setOnClickListener { pickFile(REQ_SOUNDFONT) }
+        }
+        if (sfGlass is LiquidGlassView) {
+            sfGlass.enablePressEffect = true
+            sfGlass.pressScale = 0.99f
+            sfGlass.elasticity = 0.48f
         }
         page.addView(sfGlass)
 
@@ -397,12 +403,42 @@ class MainActivity : Activity() {
         return root
     }
 
+    private fun panelBackground(
+        color: Int,
+        cornerDp: Int,
+        stroke: Int = Color.argb(72, 255, 255, 255)
+    ): GradientDrawable = GradientDrawable().apply {
+        shape = GradientDrawable.RECTANGLE
+        cornerRadius = dp(cornerDp).toFloat()
+        setColor(color)
+        setStroke(dp(1), stroke)
+    }
+
     private fun glassActionButton(
         backdrop: View,
         label: String,
         click: () -> Unit
-    ): LiquidGlassView =
-        LiquidGlassView(this).apply {
+    ): View {
+        val text = TextView(this).apply {
+            this.text = label
+            gravity = Gravity.CENTER
+            setTextColor(Color.WHITE)
+            textSize = 15f
+            typeface = Typeface.DEFAULT_BOLD
+        }
+        if (!liquidGlassEnabled) {
+            return FrameLayout(this).apply {
+                background = shellButtonBackground(primary = true)
+                isClickable = true
+                isFocusable = true
+                addView(text, FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                ))
+                setOnClickListener { click() }
+            }
+        }
+        return LiquidGlassView(this).apply {
             cornerRadius = dp(17).toFloat()
             material = GlassMaterial.CLEAR
             blurAmount = 0.12f
@@ -420,27 +456,41 @@ class MainActivity : Activity() {
             setGlassTint(uiAccent, 0.50f)
             isClickable = true
             isFocusable = true
-            addView(TextView(this@MainActivity).apply {
-                text = label
-                gravity = Gravity.CENTER
-                setTextColor(Color.WHITE)
-                textSize = 15f
-                typeface = Typeface.DEFAULT_BOLD
-            }, FrameLayout.LayoutParams(
+            addView(text, FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
             ))
             setOnClickListener { click() }
             shellGlassPanels.add(this)
         }
+    }
 
     private fun glassIconControl(
         backdrop: View,
         glyph: String,
         description: String,
         click: () -> Unit
-    ): LiquidGlassView =
-        LiquidGlassView(this).apply {
+    ): View {
+        val text = TextView(this).apply {
+            this.text = glyph
+            setTextColor(Color.WHITE)
+            textSize = 20f
+            gravity = Gravity.CENTER
+        }
+        if (!liquidGlassEnabled) {
+            return FrameLayout(this).apply {
+                background = shellButtonBackground(primary = false)
+                isClickable = true
+                isFocusable = true
+                contentDescription = description
+                addView(text, FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                ))
+                setOnClickListener { click() }
+            }
+        }
+        return LiquidGlassView(this).apply {
             cornerRadius = dp(16).toFloat()
             material = GlassMaterial.CLEAR
             blurAmount = 0.10f
@@ -459,21 +509,33 @@ class MainActivity : Activity() {
             isClickable = true
             isFocusable = true
             contentDescription = description
-            addView(TextView(this@MainActivity).apply {
-                text = glyph
-                setTextColor(Color.WHITE)
-                textSize = 20f
-                gravity = Gravity.CENTER
-            }, FrameLayout.LayoutParams(
+            addView(text, FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
             ))
             setOnClickListener { click() }
             shellGlassPanels.add(this)
         }
+    }
 
-    private fun glassValuePill(label: TextView, backdrop: View): LiquidGlassView =
-        LiquidGlassView(this).apply {
+    private fun glassValuePill(label: TextView, backdrop: View): View {
+        label.isClickable = false
+        if (!liquidGlassEnabled) {
+            return FrameLayout(this).apply {
+                background = panelBackground(
+                    Color.rgb(19, 46, 47), 14, Color.argb(105, 45, 212, 191)
+                )
+                isClickable = true
+                isFocusable = true
+                addView(label, FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    dp(40),
+                    Gravity.CENTER
+                ))
+                setOnClickListener { label.performClick() }
+            }
+        }
+        return LiquidGlassView(this).apply {
             cornerRadius = dp(14).toFloat()
             material = GlassMaterial.CLEAR
             blurAmount = 0.075f
@@ -491,7 +553,6 @@ class MainActivity : Activity() {
             setGlassTint(uiAccent2, 0.16f)
             isClickable = true
             isFocusable = true
-            label.isClickable = false
             addView(label, FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 dp(40),
@@ -500,14 +561,30 @@ class MainActivity : Activity() {
             setOnClickListener { label.performClick() }
             shellGlassPanels.add(this)
         }
+    }
 
     private fun glassPanel(
         content: View,
         backdrop: View,
         accented: Boolean = false,
         cornerDp: Int = 22
-    ): LiquidGlassView =
-        LiquidGlassView(this).apply {
+    ): View {
+        if (!liquidGlassEnabled) {
+            return FrameLayout(this).apply {
+                elevation = dp(if (accented) 8 else 5).toFloat()
+                background = panelBackground(
+                    if (accented) Color.rgb(44, 29, 78) else Color.rgb(18, 21, 32),
+                    cornerDp,
+                    if (accented) Color.argb(165, 139, 92, 246)
+                    else Color.argb(72, 255, 255, 255)
+                )
+                addView(content, FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ))
+            }
+        }
+        return LiquidGlassView(this).apply {
             cornerRadius = dp(cornerDp).toFloat()
             elevation = dp(if (accented) 8 else 5).toFloat()
             material = GlassMaterial.REGULAR
@@ -523,8 +600,6 @@ class MainActivity : Activity() {
             pressScale = 0.997f
             elasticity = 0.22f
             collectFrameStats = false
-            // We invalidate these panels from the ScrollView's scroll callback
-            // instead of continuously redrawing them while the launcher is idle.
             enableDynamicBackground = false
             backdropSource = backdrop
             setGlassTint(
@@ -537,6 +612,50 @@ class MainActivity : Activity() {
             ))
             shellGlassPanels.add(this)
         }
+    }
+
+    private fun settingsRowSurface(
+        row: View,
+        backdrop: View,
+        click: () -> Unit
+    ): View {
+        row.isClickable = false
+        if (!liquidGlassEnabled) {
+            return FrameLayout(this).apply {
+                isClickable = true
+                isFocusable = true
+                addView(row, FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ))
+                setOnClickListener { click() }
+            }
+        }
+        return LiquidGlassView(this).apply {
+            cornerRadius = dp(16).toFloat()
+            material = GlassMaterial.CLEAR
+            blurAmount = 0.10f
+            saturation = 116f
+            refractionHeight = dp(13).toFloat()
+            bevelWidth = dp(11).toFloat()
+            refractionFalloff = 2.7f
+            dispersionStrength = 0.065f
+            enablePressEffect = true
+            pressScale = 0.995f
+            elasticity = 0.48f
+            enableDynamicBackground = false
+            collectFrameStats = false
+            backdropSource = backdrop
+            setGlassTint(Color.rgb(9, 12, 22), 0.46f)
+            isClickable = true
+            isFocusable = true
+            addView(row, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ))
+            setOnClickListener { click() }
+        }
+    }
 
     private fun addVoiceControl(parent: LinearLayout, backdrop: View) {
         val header = LinearLayout(this).apply {
@@ -1426,6 +1545,7 @@ class MainActivity : Activity() {
         noteSpeed  = p.getFloat("noteSpeed", noteSpeed)
         cpuMask    = p.getLong("cpuMask", cpuMask)
         legacyRenderer = p.getBoolean("legacyRenderer", legacyRenderer)
+        liquidGlassEnabled = p.getBoolean("liquidGlass", liquidGlassEnabled)
         chunkedStreaming = p.getBoolean("diskStreaming", chunkedStreaming)
         sdPagefile = p.getBoolean("sdPagefile", sdPagefile)
         bgColor    = p.getInt("bgColor", bgColor)
@@ -1439,6 +1559,7 @@ class MainActivity : Activity() {
             .putFloat("noteSpeed", noteSpeed)
             .putLong("cpuMask", cpuMask)
             .putBoolean("legacyRenderer", legacyRenderer)
+            .putBoolean("liquidGlass", liquidGlassEnabled)
             .putBoolean("diskStreaming", chunkedStreaming)
             .putBoolean("sdPagefile", sdPagefile)
             .putInt("bgColor", bgColor)
@@ -1588,6 +1709,7 @@ class MainActivity : Activity() {
         intent.putExtra(PlaybackActivity.EXTRA_SPEED, noteSpeed)
         intent.putExtra(PlaybackActivity.EXTRA_CPU_MASK, cpuMask)
         intent.putExtra(PlaybackActivity.EXTRA_LEGACY, legacyRenderer)
+        intent.putExtra(PlaybackActivity.EXTRA_LIQUID_GLASS, liquidGlassEnabled)
         intent.putExtra(PlaybackActivity.EXTRA_STREAM, chunkedStreaming)
         // Pass the intent, not a path: the card can be pulled between here and
         // the load, so PlaybackActivity resolves the directory fresh.
