@@ -1,23 +1,22 @@
-// note.h — the playback event representation: a 1:1 mirror of PFA's event class.
+// note.h — compact playback event representation.
 //
-// PFA's slowdown is structural. Its channel events are MIDIChannelEvent objects
-// (MIDI.h:210) — a polymorphic class deriving MIDIEvent — heap-allocated per
-// track in parse order, but the dispatch loop and the O(P) note-off scan walk
-// them in TIME order, so every step pointer-chases scattered memory and thrashes
-// L2/L3 (PFA-ANALYSIS.md §4, §6, §7).
+// aPFA originally mirrored PFA's MIDIChannelEvent object field-for-field. That
+// made every event 72 bytes on arm64 before the 8-byte time-order pointer table.
+// aPFAViz deliberately keeps PFA's playback semantics but not that object bloat:
+// every runtime event is 16 bytes, naturally aligned, and carries only data the
+// player actually reads.
 //
-// PlayEvent below mirrors MIDIEvent + MIDIChannelEvent FIELD FOR FIELD. PFA
-// genuinely carries every one of these per channel event (many barely used —
-// that is PFA's real, wasteful layout, not padding we invented). Replicating it
-// gives aPFA the same per-event size (~72 B vs PFA's 80 — the 8 B difference is
-// PFA's vtable pointer, which a plain struct genuinely does not have) and so the
-// same memory footprint and the same cache working-set. One note = two events.
+// The time-ordered events[] walk, per-event MIDI dispatch, O(P) active-note
+// scan, visible time window and event ordering remain unchanged. The reduction
+// is representation/cache traffic only.
 //
-//   eventPool : every PlayEvent, laid down in PARSE order (track by track).
-//   events[]  : pointers into eventPool, sorted by TIME — the playback walk.
+// link is intentionally integer-based rather than a pointer:
+//   in the in-RAM parser after sorting: partner position in events[].
+//   in Streamer's backing pool: partner pool index (Streamer keeps its own
+//   compact position-link table for playback/slicing).
 //
-// Walking events[] in time order jumps all over eventPool: genuine, emergent
-// cache pressure, exactly PFA's.
+// absMicroSec is 32-bit because the parser already clamps every event timestamp
+// to UINT32_MAX; this does not reduce the range aPFA supported before.
 #pragma once
 
 #include <cstdint>
@@ -39,31 +38,27 @@ enum ChannelEventType {
 };
 
 struct PlayEvent {
-    // --- mirrors MIDIEvent (MIDI.h:180) ---
-    int32_t  eventType;        // m_eEventType    — ChannelEvent for every note
-    int32_t  eventCode;        // m_iEventCode    — raw MIDI status byte
-    int32_t  track;            // m_iTrack
-    int32_t  deltaTicks;       // m_iDT
-    int32_t  absTicks;         // m_iAbsT
-    int64_t  absMicroSec;      // m_llAbsMicroSec — absolute event time
-    // --- mirrors MIDIChannelEvent (MIDI.h:210) ---
-    int32_t  channelEventType; // m_eChannelEventType — kNoteOn / kNoteOff / etc.
-    int32_t  inputQuality;     // m_eInputQuality
-    uint8_t  channel;          // m_cChannel
-    uint8_t  param1;           // m_cParam1 — key (0-127) or CC# or program#
-    uint8_t  param2;           // m_cParam2 — velocity / CC value / pitch MSB
-    PlayEvent* sister;         // m_pSister — note-on <-> note-off pairing (nullptr for non-note events)
-    int32_t  simultaneous;     // m_iSimultaneous
-    void*    label;            // m_sLabel
+    uint32_t absMicroSec;      // absolute event time (µs), clamped to UINT32_MAX
+    uint32_t link;             // partner position/index; semantics documented above
+    uint16_t track;            // SMF track number (header field is 16-bit)
+    uint8_t  eventCode;        // raw MIDI status byte
+    uint8_t  param1;           // key / controller / program
+    uint8_t  param2;           // velocity / controller value / pitch MSB
+    uint8_t  channel;          // MIDI channel 0..15
+    uint8_t  channelEventType; // high nibble: 8..E
+    uint8_t  reserved;         // keeps the hot record naturally 16-byte aligned
 
-    bool isNoteOn()       const { return channelEventType == kNoteOn; }
-    bool isNoteOff()      const { return channelEventType == kNoteOff; }
-    bool isController()   const { return channelEventType == kController; }
-    bool isProgramChange()const { return channelEventType == kProgramChange; }
-    bool isPitchBend()    const { return channelEventType == kPitchBend; }
-    // True for any event that is NOT a note-on or note-off (CC, ProgramChange, PitchBend, etc.)
-    bool isNonNote()      const { return channelEventType != kNoteOn && channelEventType != kNoteOff; }
+    bool isNoteOn()        const { return channelEventType == kNoteOn; }
+    bool isNoteOff()       const { return channelEventType == kNoteOff; }
+    bool isController()    const { return channelEventType == kController; }
+    bool isProgramChange() const { return channelEventType == kProgramChange; }
+    bool isPitchBend()     const { return channelEventType == kPitchBend; }
+    bool isNonNote() const {
+        return channelEventType != kNoteOn && channelEventType != kNoteOff;
+    }
 };
+
+static_assert(sizeof(PlayEvent) == 16, "PlayEvent must stay a 16-byte hot record");
 
 // HSV (h,s,v in 0..1) -> packed 0xAABBGGRR (memory order R,G,B,A for a GL
 // 4x UNSIGNED_BYTE normalized vertex attribute).
