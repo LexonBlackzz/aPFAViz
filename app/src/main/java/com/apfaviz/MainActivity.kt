@@ -105,11 +105,10 @@ class MainActivity : Activity() {
     private val is32BitProcess: Boolean
         get() = !android.os.Process.is64Bit()
 
-    // "Chunked Disk Streaming" (Advanced Settings): allow the chunked on-disk
-    // pagefile sort for MIDIs whose load transient exceeds RAM (~80M+ notes).
-    // Streaming itself stays automatic either way (RAM-fit prediction / crash
-    // marker); without this, beyond-ceiling MIDIs are refused with a message
-    // pointing here. Pref/extra key stays "diskStreaming" for settings compat.
+    // "Force Chunked Disk Sort" (Advanced Settings): large streaming loads
+    // chunk automatically when RAM would spike; this switch forces the bounded
+    // disk-backed sort for smaller streaming loads too. Pref/extra key remains
+    // "diskStreaming" for settings compatibility.
     private var chunkedStreaming = false
     // "Pagefile Location = SD Card" (Advanced Settings): put the streaming pool
     // file on the removable card instead of internal storage. Only offered where
@@ -1165,7 +1164,7 @@ class MainActivity : Activity() {
         }
         container.addView(streamBox)
 
-        // --- Pagefile Location (nested under Chunked Disk Streaming) ---
+        // --- Pagefile Location (streaming pool storage) ---
         // Where the pagefile is written, rather than whether there is one: the
         // pagefile IS the streaming pool, so this applies to any streaming load
         // — which is why the choice stays live with the box above unticked.
