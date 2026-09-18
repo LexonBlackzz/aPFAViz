@@ -920,38 +920,82 @@ class MainActivity : Activity() {
                 textSize = 24f
                 gravity = Gravity.CENTER
             }, LinearLayout.LayoutParams(dp(30), dp(44)))
-            val rowGlass = LiquidGlassView(this).apply {
-                cornerRadius = dp(16).toFloat()
-                material = GlassMaterial.CLEAR
-                blurAmount = 0.10f
-                saturation = 116f
-                refractionHeight = dp(13).toFloat()
-                bevelWidth = dp(11).toFloat()
-                refractionFalloff = 2.7f
-                dispersionStrength = 0.065f
-                enablePressEffect = true
-                pressScale = 0.995f
-                elasticity = 0.48f
-                enableDynamicBackground = false
-                collectFrameStats = false
-                backdropSource = activityBackdrop
-                setGlassTint(Color.rgb(9, 12, 22), 0.46f)
-                isClickable = true
-                isFocusable = true
-                addView(row, FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT
-                ))
-                setOnClickListener {
-                    dialog.dismiss()
-                    click()
-                }
+            val surface = settingsRowSurface(row, activityBackdrop) {
+                dialog.dismiss()
+                click()
             }
-            row.isClickable = false
-            sheetContent.addView(rowGlass, LinearLayout.LayoutParams(
+            sheetContent.addView(surface, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ).apply { bottomMargin = dp(8) })
+        }
+
+        fun toggle(title: String, subtitle: String, checked: Boolean, changed: (Boolean) -> Unit) {
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(12), dp(10), dp(8), dp(10))
+                background = GradientDrawable().apply {
+                    cornerRadius = dp(15).toFloat()
+                    setColor(Color.argb(72, 6, 9, 18))
+                    setStroke(dp(1), Color.argb(58, 255, 255, 255))
+                }
+            }
+            val copy = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            copy.addView(TextView(this).apply {
+                text = title
+                setTextColor(Color.WHITE)
+                textSize = 14f
+                typeface = Typeface.DEFAULT_BOLD
+            })
+            copy.addView(TextView(this).apply {
+                text = subtitle
+                setTextColor(Color.rgb(205, 211, 226))
+                textSize = 12f
+                maxLines = 2
+            }, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(2) })
+            row.addView(copy, LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f
+            ))
+
+            val box = CheckBox(this).apply {
+                isChecked = checked
+                isClickable = false
+                isFocusable = false
+                buttonTintList = ColorStateList(
+                    arrayOf(
+                        intArrayOf(android.R.attr.state_checked),
+                        intArrayOf()
+                    ),
+                    intArrayOf(uiAccent2, Color.rgb(126, 133, 151))
+                )
+            }
+            row.addView(box, LinearLayout.LayoutParams(dp(48), dp(48)))
+
+            val surface = settingsRowSurface(row, activityBackdrop) {
+                val next = !box.isChecked
+                box.isChecked = next
+                changed(next)
+            }
+            sheetContent.addView(surface, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dp(8) })
+        }
+
+        group("Appearance")
+        toggle(
+            "Liquid Glass",
+            "Refraction, blur and elastic glass surfaces",
+            liquidGlassEnabled
+        ) { enabled ->
+            liquidGlassEnabled = enabled
+            saveSettings()
+            dialog.dismiss()
+            setContentView(buildSetupScreen())
         }
 
         group("Performance")
@@ -975,34 +1019,48 @@ class MainActivity : Activity() {
                 .show()
         }
 
-        val glass = LiquidGlassView(this).apply {
-            cornerRadius = dp(30).toFloat()
-            material = GlassMaterial.REGULAR
-            blurAmount = 0.22f
-            saturation = 112f
-            refractionHeight = dp(27).toFloat()
-            bevelWidth = dp(22).toFloat()
-            refractionFalloff = 2.7f
-            dispersionStrength = 0.10f
-            enableSensorHighlight = false
-            enableAdaptiveTint = false
-            enableDynamicBackground = false
-            enablePressEffect = false
-            collectFrameStats = false
-            backdropSource = activityBackdrop
-            setGlassTint(Color.rgb(8, 10, 20), 0.62f)
-            addView(ScrollView(this@MainActivity).apply {
-                overScrollMode = View.OVER_SCROLL_NEVER
-                addView(sheetContent)
-            }, FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ))
+        val sheetScroll = ScrollView(this).apply {
+            overScrollMode = View.OVER_SCROLL_NEVER
+            addView(sheetContent)
+        }
+        val sheetSurface: View = if (liquidGlassEnabled) {
+            LiquidGlassView(this).apply {
+                cornerRadius = dp(30).toFloat()
+                material = GlassMaterial.REGULAR
+                blurAmount = 0.22f
+                saturation = 112f
+                refractionHeight = dp(27).toFloat()
+                bevelWidth = dp(22).toFloat()
+                refractionFalloff = 2.7f
+                dispersionStrength = 0.10f
+                enableSensorHighlight = false
+                enableAdaptiveTint = false
+                enableDynamicBackground = false
+                enablePressEffect = false
+                collectFrameStats = false
+                backdropSource = activityBackdrop
+                setGlassTint(Color.rgb(8, 10, 20), 0.62f)
+                addView(sheetScroll, FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ))
+            }
+        } else {
+            FrameLayout(this).apply {
+                background = panelBackground(
+                    Color.rgb(10, 13, 23), 30, Color.argb(86, 255, 255, 255)
+                )
+                elevation = dp(12).toFloat()
+                addView(sheetScroll, FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ))
+            }
         }
 
         val outer = FrameLayout(this).apply {
             setPadding(dp(14), dp(14), dp(14), dp(18))
-            addView(glass, FrameLayout.LayoutParams(
+            addView(sheetSurface, FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ).apply { gravity = Gravity.BOTTOM })
@@ -1025,7 +1083,7 @@ class MainActivity : Activity() {
                 ViewGroup.LayoutParams.WRAP_CONTENT
             )
         }
-        animateGlassInDialog(glass)
+        animateGlassInDialog(sheetSurface)
     }
 
     private fun animateGlassInDialog(view: View) {
