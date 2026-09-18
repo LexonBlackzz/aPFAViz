@@ -184,17 +184,35 @@ class MainActivity : Activity() {
         val backdrop = FrameLayout(this)
         val bg = ImageView(this).apply {
             scaleType = ImageView.ScaleType.CENTER_CROP
-            alpha = 0.58f
+            alpha = 0.72f
         }
         loadAsset("apfa-wp.jpg")?.let { bg.setImageBitmap(it) } ?: bg.setBackgroundColor(uiBg)
         backdrop.addView(bg, FrameLayout.LayoutParams(mp, mp))
+        fun launcherGlow(color: Int, sizeDp: Int, gravity: Int, xDp: Int, yDp: Int) {
+            backdrop.addView(View(this).apply {
+                alpha = 0.66f
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.OVAL
+                    gradientType = GradientDrawable.RADIAL_GRADIENT
+                    gradientRadius = dp(sizeDp).toFloat() * 0.52f
+                    colors = intArrayOf(color, Color.TRANSPARENT)
+                }
+            }, FrameLayout.LayoutParams(dp(sizeDp), dp(sizeDp)).apply {
+                this.gravity = gravity
+                setMargins(dp(xDp), dp(yDp), dp(xDp), dp(yDp))
+            })
+        }
+        launcherGlow(Color.argb(150, 139, 92, 246), 300,
+            Gravity.TOP or Gravity.END, -70, -45)
+        launcherGlow(Color.argb(120, 45, 212, 191), 260,
+            Gravity.BOTTOM or Gravity.START, -65, 35)
         backdrop.addView(View(this).apply {
             background = GradientDrawable(
                 GradientDrawable.Orientation.TOP_BOTTOM,
                 intArrayOf(
-                    Color.argb(200, 5, 7, 14),
-                    Color.argb(88, 8, 10, 18),
-                    Color.argb(228, 5, 7, 14)
+                    Color.argb(154, 5, 7, 14),
+                    Color.argb(54, 8, 10, 18),
+                    Color.argb(196, 5, 7, 14)
                 )
             )
         }, FrameLayout.LayoutParams(mp, mp))
@@ -418,6 +436,8 @@ class MainActivity : Activity() {
         label: String,
         click: () -> Unit
     ): View {
+        // Primary actions are intentionally solid: the saturated button is the
+        // visual anchor while glass is reserved for genuinely floating chrome.
         val text = TextView(this).apply {
             this.text = label
             gravity = Gravity.CENTER
@@ -425,34 +445,9 @@ class MainActivity : Activity() {
             textSize = 15f
             typeface = Typeface.DEFAULT_BOLD
         }
-        if (!liquidGlassEnabled) {
-            return FrameLayout(this).apply {
-                background = shellButtonBackground(primary = true)
-                isClickable = true
-                isFocusable = true
-                addView(text, FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.MATCH_PARENT
-                ))
-                setOnClickListener { click() }
-            }
-        }
-        return LiquidGlassView(this).apply {
-            cornerRadius = dp(17).toFloat()
-            material = GlassMaterial.CLEAR
-            blurAmount = 0.12f
-            saturation = 128f
-            refractionHeight = dp(19).toFloat()
-            bevelWidth = dp(15).toFloat()
-            refractionFalloff = 2.7f
-            dispersionStrength = 0.12f
-            enablePressEffect = true
-            pressScale = 0.99f
-            elasticity = 0.56f
-            enableDynamicBackground = false
-            collectFrameStats = false
-            backdropSource = backdrop
-            setGlassTint(uiAccent, 0.50f)
+        return FrameLayout(this).apply {
+            background = shellButtonBackground(primary = true)
+            elevation = dp(6).toFloat()
             isClickable = true
             isFocusable = true
             addView(text, FrameLayout.LayoutParams(
@@ -460,7 +455,6 @@ class MainActivity : Activity() {
                 ViewGroup.LayoutParams.MATCH_PARENT
             ))
             setOnClickListener { click() }
-            shellGlassPanels.add(this)
         }
     }
 
@@ -492,19 +486,19 @@ class MainActivity : Activity() {
         return LiquidGlassView(this).apply {
             cornerRadius = dp(16).toFloat()
             material = GlassMaterial.CLEAR
-            blurAmount = 0.10f
-            saturation = 122f
-            refractionHeight = dp(15).toFloat()
-            bevelWidth = dp(12).toFloat()
-            refractionFalloff = 2.7f
-            dispersionStrength = 0.09f
+            blurAmount = 0.19f
+            saturation = 142f
+            refractionHeight = dp(14).toFloat()
+            bevelWidth = dp(10).toFloat()
+            refractionFalloff = 3.1f
+            dispersionStrength = 0.045f
             enablePressEffect = true
-            pressScale = 0.99f
-            elasticity = 0.52f
+            pressScale = 0.985f
+            elasticity = 0.16f
             enableDynamicBackground = false
             collectFrameStats = false
             backdropSource = backdrop
-            setGlassTint(Color.rgb(27, 31, 47), 0.30f)
+            setGlassTint(Color.WHITE, 0.08f)
             isClickable = true
             isFocusable = true
             contentDescription = description
@@ -518,38 +512,12 @@ class MainActivity : Activity() {
     }
 
     private fun glassValuePill(label: TextView, backdrop: View): View {
+        // Controls inside a card stay flat; nested glass is muddy and expensive.
         label.isClickable = false
-        if (!liquidGlassEnabled) {
-            return FrameLayout(this).apply {
-                background = panelBackground(
-                    Color.rgb(19, 46, 47), 14, Color.argb(105, 45, 212, 191)
-                )
-                isClickable = true
-                isFocusable = true
-                addView(label, FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                    dp(40),
-                    Gravity.CENTER
-                ))
-                setOnClickListener { label.performClick() }
-            }
-        }
-        return LiquidGlassView(this).apply {
-            cornerRadius = dp(14).toFloat()
-            material = GlassMaterial.CLEAR
-            blurAmount = 0.075f
-            saturation = 120f
-            refractionHeight = dp(11).toFloat()
-            bevelWidth = dp(10).toFloat()
-            refractionFalloff = 2.6f
-            dispersionStrength = 0.055f
-            enablePressEffect = true
-            pressScale = 0.995f
-            elasticity = 0.50f
-            enableDynamicBackground = false
-            collectFrameStats = false
-            backdropSource = backdrop
-            setGlassTint(uiAccent2, 0.16f)
+        return FrameLayout(this).apply {
+            background = panelBackground(
+                Color.argb(118, 15, 52, 52), 14, Color.argb(96, 45, 212, 191)
+            )
             isClickable = true
             isFocusable = true
             addView(label, FrameLayout.LayoutParams(
@@ -558,7 +526,6 @@ class MainActivity : Activity() {
                 Gravity.CENTER
             ))
             setOnClickListener { label.performClick() }
-            shellGlassPanels.add(this)
         }
     }
 
@@ -567,85 +534,27 @@ class MainActivity : Activity() {
         backdrop: View,
         accented: Boolean = false,
         cornerDp: Int = 22
-    ): View {
-        if (!liquidGlassEnabled) {
-            return FrameLayout(this).apply {
-                elevation = dp(if (accented) 8 else 5).toFloat()
-                background = panelBackground(
-                    if (accented) Color.rgb(44, 29, 78) else Color.rgb(18, 21, 32),
-                    cornerDp,
-                    if (accented) Color.argb(165, 139, 92, 246)
-                    else Color.argb(72, 255, 255, 255)
-                )
-                addView(content, FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT
-                ))
-            }
-        }
-        return LiquidGlassView(this).apply {
-            cornerRadius = dp(cornerDp).toFloat()
-            elevation = dp(if (accented) 8 else 5).toFloat()
-            material = GlassMaterial.REGULAR
-            blurAmount = if (accented) 0.14f else 0.10f
-            saturation = 124f
-            refractionHeight = dp(if (accented) 30 else 21).toFloat()
-            bevelWidth = dp(if (accented) 22 else 18).toFloat()
-            refractionFalloff = 2.6f
-            dispersionStrength = if (accented) 0.13f else 0.075f
-            enableSensorHighlight = false
-            enableAdaptiveTint = false
-            enablePressEffect = true
-            pressScale = 0.997f
-            elasticity = 0.22f
-            collectFrameStats = false
-            enableDynamicBackground = false
-            backdropSource = backdrop
-            setGlassTint(
-                if (accented) uiAccent else Color.rgb(18, 21, 32),
-                if (accented) 0.18f else 0.24f
+    ): View =
+        FrameLayout(this).apply {
+            elevation = dp(if (accented) 7 else 3).toFloat()
+            background = panelBackground(
+                if (accented) Color.rgb(31, 26, 48) else Color.rgb(17, 20, 31),
+                cornerDp,
+                if (accented) Color.argb(138, 139, 92, 246)
+                else Color.argb(58, 255, 255, 255)
             )
             addView(content, FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ))
-            shellGlassPanels.add(this)
         }
-    }
 
     private fun settingsRowSurface(
         row: View,
         backdrop: View,
         click: () -> Unit
-    ): View {
-        row.isClickable = false
-        if (!liquidGlassEnabled) {
-            return FrameLayout(this).apply {
-                isClickable = true
-                isFocusable = true
-                addView(row, FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT
-                ))
-                setOnClickListener { click() }
-            }
-        }
-        return LiquidGlassView(this).apply {
-            cornerRadius = dp(16).toFloat()
-            material = GlassMaterial.CLEAR
-            blurAmount = 0.10f
-            saturation = 116f
-            refractionHeight = dp(13).toFloat()
-            bevelWidth = dp(11).toFloat()
-            refractionFalloff = 2.7f
-            dispersionStrength = 0.065f
-            enablePressEffect = true
-            pressScale = 0.995f
-            elasticity = 0.48f
-            enableDynamicBackground = false
-            collectFrameStats = false
-            backdropSource = backdrop
-            setGlassTint(Color.rgb(9, 12, 22), 0.46f)
+    ): View =
+        FrameLayout(this).apply {
             isClickable = true
             isFocusable = true
             addView(row, FrameLayout.LayoutParams(
@@ -654,7 +563,6 @@ class MainActivity : Activity() {
             ))
             setOnClickListener { click() }
         }
-    }
 
     private fun addVoiceControl(parent: LinearLayout, backdrop: View) {
         val header = LinearLayout(this).apply {
