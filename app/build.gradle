@@ -13,7 +13,7 @@ if (hasReleaseKeystore) {
 }
 
 android {
-    namespace 'com.apfa'
+    namespace 'com.apfaviz'
     compileSdk 34
     // Keep the proven native toolchain for now. The app itself now targets
     // Android 7.0+ so the UI can use the modern platform APIs without carrying
@@ -32,7 +32,7 @@ android {
     }
 
     defaultConfig {
-        applicationId 'com.apfa'
+        applicationId 'com.apfaviz'
         // Android 7.0 (Nougat). LiquidGlass requires API 24+, while the
         // rest of the shell continues to avoid legacy pre-SAF compatibility paths.
         minSdk 24
