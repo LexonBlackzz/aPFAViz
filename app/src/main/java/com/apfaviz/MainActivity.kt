@@ -3,7 +3,6 @@ package com.apfaviz
 import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
-import android.app.Dialog
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
@@ -13,7 +12,6 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.Typeface
-import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.RippleDrawable
 import android.net.Uri
@@ -130,6 +128,7 @@ class MainActivity : Activity() {
     // LiquidGlass panels are invalidated only while the launcher scrolls.
     // This avoids an always-on redraw loop on API 24-32's CPU fallback.
     private val shellGlassPanels = ArrayList<LiquidGlassView>()
+    private var settingsOverlay: View? = null
 
     // Shell-only palette. None of this touches native rendering or PFA timing.
     private val uiBg       = Color.rgb(9, 11, 18)
@@ -156,7 +155,19 @@ class MainActivity : Activity() {
         super.onConfigurationChanged(newConfig)
         // MainActivity handles rotation itself so the setup shell can swap
         // between its portrait stack and landscape two-column layout.
+        settingsOverlay = null
         setContentView(buildSetupScreen())
+    }
+
+    @Suppress("DEPRECATION")
+    override fun onBackPressed() {
+        val overlay = settingsOverlay
+        if (overlay != null) {
+            (overlay.parent as? ViewGroup)?.removeView(overlay)
+            settingsOverlay = null
+            return
+        }
+        super.onBackPressed()
     }
 
     // Old devices (and some OEM pickers, e.g. Huawei EMUI) return file:// URIs from
@@ -750,12 +761,26 @@ class MainActivity : Activity() {
     }
 
     private fun showSettingsDialog() {
-        val dialog = Dialog(this)
-        val activityBackdrop = findViewById<View>(android.R.id.content)
+        if (settingsOverlay != null) return
+
+        // Keep the sheet in the SAME window as the launcher. The previous
+        // Dialog lived in a separate window, so LiquidGlass could only reuse a
+        // captured frame of the Activity and visibly looked frozen.
+        val host = findViewById<ViewGroup>(android.R.id.content)
+        if (host.childCount == 0) return
+        val activityBackdrop = host.getChildAt(0)
+
+        lateinit var overlay: FrameLayout
+        fun dismissSheet() {
+            if (settingsOverlay === overlay) {
+                host.removeView(overlay)
+                settingsOverlay = null
+            }
+        }
 
         val sheetContent = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(18), dp(20), dp(18))
+            setPadding(dp(20), dp(18), dp(20), dp(20))
         }
 
         val titleRow = LinearLayout(this).apply {
@@ -771,12 +796,27 @@ class MainActivity : Activity() {
         titleRow.addView(TextView(this).apply {
             text = "×"
             contentDescription = "Close settings"
-            setTextColor(Color.rgb(220, 225, 238))
+            setTextColor(Color.WHITE)
             textSize = 26f
             gravity = Gravity.CENTER
-            setOnClickListener { dialog.dismiss() }
+            setOnClickListener { dismissSheet() }
         }, LinearLayout.LayoutParams(dp(44), dp(44)))
         sheetContent.addView(titleRow)
+
+        // A directional highlight gives the sheet a readable lens rim without
+        // putting another glass layer around it.
+        sheetContent.addView(View(this).apply {
+            background = GradientDrawable(
+                GradientDrawable.Orientation.LEFT_RIGHT,
+                intArrayOf(
+                    Color.argb(118, 255, 255, 255),
+                    Color.argb(34, 255, 255, 255),
+                    Color.TRANSPARENT
+                )
+            )
+        }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(1)
+        ).apply { topMargin = dp(3); bottomMargin = dp(3) })
 
         fun group(title: String) {
             sheetContent.addView(TextView(this).apply {
@@ -798,8 +838,8 @@ class MainActivity : Activity() {
                 setPadding(dp(12), dp(10), dp(8), dp(10))
                 background = GradientDrawable().apply {
                     cornerRadius = dp(15).toFloat()
-                    setColor(Color.argb(72, 6, 9, 18))
-                    setStroke(dp(1), Color.argb(58, 255, 255, 255))
+                    setColor(Color.argb(154, 8, 11, 20))
+                    setStroke(dp(1), Color.argb(48, 255, 255, 255))
                 }
             }
             val copy = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -811,7 +851,7 @@ class MainActivity : Activity() {
             })
             copy.addView(TextView(this).apply {
                 text = subtitle
-                setTextColor(Color.rgb(205, 211, 226))
+                setTextColor(Color.rgb(217, 222, 235))
                 textSize = 12f
                 maxLines = 2
             }, LinearLayout.LayoutParams(
@@ -823,12 +863,13 @@ class MainActivity : Activity() {
             ))
             row.addView(TextView(this).apply {
                 text = "›"
-                setTextColor(Color.rgb(196, 203, 222))
+                setTextColor(Color.rgb(205, 211, 227))
                 textSize = 24f
                 gravity = Gravity.CENTER
             }, LinearLayout.LayoutParams(dp(30), dp(44)))
+
             val surface = settingsRowSurface(row, activityBackdrop) {
-                dialog.dismiss()
+                dismissSheet()
                 click()
             }
             sheetContent.addView(surface, LinearLayout.LayoutParams(
@@ -844,8 +885,8 @@ class MainActivity : Activity() {
                 setPadding(dp(12), dp(10), dp(8), dp(10))
                 background = GradientDrawable().apply {
                     cornerRadius = dp(15).toFloat()
-                    setColor(Color.argb(72, 6, 9, 18))
-                    setStroke(dp(1), Color.argb(58, 255, 255, 255))
+                    setColor(Color.argb(154, 8, 11, 20))
+                    setStroke(dp(1), Color.argb(48, 255, 255, 255))
                 }
             }
             val copy = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -857,7 +898,7 @@ class MainActivity : Activity() {
             })
             copy.addView(TextView(this).apply {
                 text = subtitle
-                setTextColor(Color.rgb(205, 211, 226))
+                setTextColor(Color.rgb(217, 222, 235))
                 textSize = 12f
                 maxLines = 2
             }, LinearLayout.LayoutParams(
@@ -896,12 +937,12 @@ class MainActivity : Activity() {
         group("Appearance")
         toggle(
             "Liquid Glass",
-            "Refraction, blur and elastic glass surfaces",
+            "Backdrop blur and lens effect on floating UI only",
             liquidGlassEnabled
         ) { enabled ->
             liquidGlassEnabled = enabled
             saveSettings()
-            dialog.dismiss()
+            dismissSheet()
             setContentView(buildSetupScreen())
         }
 
@@ -909,7 +950,7 @@ class MainActivity : Activity() {
         action("Core affinity", if (cpuMask == 0L) "Auto" else "Custom mask") {
             showCoreAffinityDialog()
         }
-        action("Compatibility & streaming", "Legacy renderer, chunked streaming, pagefile location") {
+        action("Compatibility & streaming", "Legacy renderer, disk sort, pagefile location") {
             showAdvancedSettingsDialog()
         }
 
@@ -918,8 +959,8 @@ class MainActivity : Activity() {
             AlertDialog.Builder(this)
                 .setTitle("About aPFAViz")
                 .setMessage(
-                    "aPFAViz v${appVersion()}\n\nContributors\nStarzainia • HexagonMIDIs\nmappazinho • LexonBlackzz\n\n" +
-                    "A PFA-faithful Android MIDI player.\n\n" +
+                    "aPFAViz v${appVersion()}\n\nContributors\nStarzainia • HexagonMIDIs\n" +
+                    "mappazinho • LexonBlackzz\n\nA PFA-faithful Android MIDI player.\n\n" +
                     "LiquidGlass Android by pandadog / QWEA0 — MIT License."
                 )
                 .setPositiveButton("OK", null)
@@ -930,23 +971,27 @@ class MainActivity : Activity() {
             overScrollMode = View.OVER_SCROLL_NEVER
             addView(sheetContent)
         }
+
         val sheetSurface: View = if (liquidGlassEnabled) {
             LiquidGlassView(this).apply {
-                cornerRadius = dp(30).toFloat()
+                cornerRadius = dp(28).toFloat()
                 material = GlassMaterial.REGULAR
-                blurAmount = 0.22f
-                saturation = 112f
-                refractionHeight = dp(27).toFloat()
-                bevelWidth = dp(22).toFloat()
-                refractionFalloff = 2.7f
-                dispersionStrength = 0.10f
+                // One strong glass surface instead of many weak nested ones.
+                blurAmount = 0.31f
+                saturation = 148f
+                refractionHeight = dp(18).toFloat()
+                bevelWidth = dp(12).toFloat()
+                refractionFalloff = 3.2f
+                dispersionStrength = 0.04f
                 enableSensorHighlight = false
                 enableAdaptiveTint = false
-                enableDynamicBackground = false
+                enableDynamicBackground = true
                 enablePressEffect = false
                 collectFrameStats = false
                 backdropSource = activityBackdrop
-                setGlassTint(Color.rgb(8, 10, 20), 0.62f)
+                setGlassTint(Color.WHITE, 0.09f)
+                elevation = dp(18).toFloat()
+                isClickable = true
                 addView(sheetScroll, FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT
@@ -955,9 +1000,10 @@ class MainActivity : Activity() {
         } else {
             FrameLayout(this).apply {
                 background = panelBackground(
-                    Color.rgb(10, 13, 23), 30, Color.argb(86, 255, 255, 255)
+                    Color.rgb(10, 13, 23), 28, Color.argb(82, 255, 255, 255)
                 )
-                elevation = dp(12).toFloat()
+                elevation = dp(16).toFloat()
+                isClickable = true
                 addView(sheetScroll, FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT
@@ -965,31 +1011,33 @@ class MainActivity : Activity() {
             }
         }
 
-        val outer = FrameLayout(this).apply {
-            setPadding(dp(14), dp(14), dp(14), dp(18))
-            addView(sheetSurface, FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply { gravity = Gravity.BOTTOM })
+        overlay = FrameLayout(this).apply {
+            isClickable = true
+            setOnClickListener { dismissSheet() }
         }
+        overlay.addView(View(this).apply {
+            setBackgroundColor(Color.argb(142, 0, 0, 0))
+        }, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        ))
 
-        dialog.setContentView(outer)
-        dialog.setCanceledOnTouchOutside(true)
-        dialog.window?.apply {
-            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-            addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
-            setDimAmount(0.34f)
-            setWindowAnimations(0)
-            setGravity(Gravity.BOTTOM)
-        }
-        dialog.show()
-        dialog.window?.apply {
-            decorView.setPadding(0, 0, 0, 0)
-            setLayout(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            )
-        }
+        // The sheet itself consumes taps so they do not dismiss through to the
+        // full-screen overlay.
+        sheetSurface.setOnClickListener { }
+        overlay.addView(sheetSurface, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply {
+            gravity = Gravity.BOTTOM
+            setMargins(dp(14), dp(14), dp(14), dp(18))
+        })
+
+        settingsOverlay = overlay
+        host.addView(overlay, ViewGroup.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        ))
         animateGlassInDialog(sheetSurface)
     }
 
