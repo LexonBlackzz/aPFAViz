@@ -6,12 +6,13 @@
 // preserves the exact playback/render ordering.
 //
 // Times are stored as TICKS in absMicroSec during parsing and converted to
-// microseconds in place. Note-on/off link fields initially hold partner POOL
-// indices; after sorting they are remapped to partner positions in events[].
-// No runtime sister pointer is stored inside the 16-byte event.
+// microseconds in place. A note-on's link temporarily holds its partner pool
+// index, then becomes the note's absolute end time. No runtime sister pointer
+// is stored inside the 16-byte event.
 #include "midi_parser.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdlib>   // srand (PFA seeds the RNG once at startup)
 #include <ctime>     // time   (srand seed source)
 #include <vector>
@@ -20,6 +21,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include "platform.h"
+#include "parallel_load.h"
 
 namespace apfa {
 namespace {
@@ -252,58 +254,75 @@ MidiData parseMidi(const std::string& path, std::atomic<float>& progress,
         return s.usAtTick + uint64_t(tick - s.tick) * s.usPerQuarter / ticksPerQuarter;
     };
 
-    // ---- ticks -> microseconds (in place over the compact pool) ----
+    // ---- ticks -> microseconds (parallel over the compact pool) ----
     progress = 0.60f;
     uint64_t totalUs = 0;
     size_t   poolN   = out.eventPool.size();
-    for (size_t i = 0; i < poolN; i++) {
-        PlayEvent& e = out.eventPool[i];
-        uint64_t us = tickToUs(static_cast<uint32_t>(e.absMicroSec));  // held a tick
-        if (us > 0xFFFFFFFFull) us = 0xFFFFFFFFull;
-        e.absMicroSec = static_cast<uint32_t>(us);
-        if (us > totalUs) totalUs = us;
-        if ((i & 0xFFFFF) == 0)
-            progress = 0.62f + 0.12f * float(i) / float(poolN ? poolN : 1);
-    }
+    std::array<uint64_t, 4> localMaxUs{};
+    const unsigned convertWorkers = parallelForRanges(
+        poolN, 262144,
+        [&](size_t begin, size_t end, unsigned worker) {
+            uint64_t localMax = 0;
+            for (size_t i = begin; i < end; i++) {
+                PlayEvent& e = out.eventPool[i];
+                uint64_t us = tickToUs(static_cast<uint32_t>(e.absMicroSec));
+                if (us > 0xFFFFFFFFull) us = 0xFFFFFFFFull;
+                e.absMicroSec = static_cast<uint32_t>(us);
+                if (us > localMax) localMax = us;
+            }
+            localMaxUs[worker] = localMax;
+        });
+    for (unsigned w = 0; w < convertWorkers; ++w)
+        if (localMaxUs[w] > totalUs) totalUs = localMaxUs[w];
+    progress = 0.72f;
 
-    // Replace temporary note pair indices with direct end timestamps.
-    // This removes a random partner-event dereference for every visible note on
-    // every frame.
-    for (PlayEvent& e : out.eventPool) {
-        if (e.isNoteOn()) {
-            if (e.link < poolN) e.link = out.eventPool[e.link].absMicroSec;
-            else                e.link = e.absMicroSec;
-        } else if (e.isNoteOff()) {
-            e.link = kNoEventLink;
-        }
-    }
+    // Resolve pair indices to direct end timestamps in parallel. This is safe
+    // only after the conversion phase has joined: every partner timestamp is
+    // final before any worker reads it.
+    parallelForRanges(
+        poolN, 262144,
+        [&](size_t begin, size_t end, unsigned) {
+            for (size_t i = begin; i < end; ++i) {
+                PlayEvent& e = out.eventPool[i];
+                if (e.isNoteOn()) {
+                    if (e.link < poolN) e.link = out.eventPool[e.link].absMicroSec;
+                    else                e.link = e.absMicroSec;
+                } else if (e.isNoteOff()) {
+                    e.link = kNoEventLink;
+                }
+            }
+        });
+    progress = 0.74f;
 
     // ---- time-sorted pointer table (the playback walk order) ----
-    progress = 0.74f;
     out.events.resize(poolN);
-    for (size_t i = 0; i < poolN; i++) out.events[i] = &out.eventPool[i];
-    progress = 0.80f;
-    // PFA Z-order: events are merged track-by-track with a min-heap that breaks ties
-    // by lowest track index first. This means track 0 events come first in the sorted
-    // list and are drawn first (underneath); the highest-numbered track is drawn last
-    // (on top). Within the same track and timestamp, preserve original parse order
-    // (pointer comparison works because all events are contiguous in eventPool).
-    // Parse order is the final tie-break explicitly, so stability is part of
-    // the comparator rather than paid for with stable_sort's O(N) temporary
-    // pointer buffer.
-    std::sort(out.events.begin(), out.events.end(),
-              [](const PlayEvent* a, const PlayEvent* b) {
-                  if (a->absMicroSec != b->absMicroSec)
-                      return a->absMicroSec < b->absMicroSec;
-                  if (a->track != b->track)
-                      return a->track < b->track;  // lower track = underneath
-                  if (a->channelEventType != b->channelEventType)
-                      return a->channelEventType > b->channelEventType;
-                  return a < b;  // same contiguous eventPool => parse order
-              });
+    parallelForRanges(
+        poolN, 524288,
+        [&](size_t begin, size_t end, unsigned) {
+            for (size_t i = begin; i < end; ++i)
+                out.events[i] = &out.eventPool[i];
+        });
+    progress = 0.79f;
+
+    // PFA Z-order: time, track, event type, then parse order. Sort disjoint
+    // ranges on multiple cores, then merge them in deterministic rounds.
+    auto eventLess = [](const PlayEvent* a, const PlayEvent* b) {
+        if (a->absMicroSec != b->absMicroSec)
+            return a->absMicroSec < b->absMicroSec;
+        if (a->track != b->track)
+            return a->track < b->track;
+        if (a->channelEventType != b->channelEventType)
+            return a->channelEventType > b->channelEventType;
+        return a < b;
+    };
+    const unsigned sortWorkers =
+        parallelSort(out.events.begin(), out.events.end(), eventLess, 524288, 4);
+    progress = 0.90f;
+    LOGI("parseMidi: multicore convert=%u sort=%u worker(s)",
+         convertWorkers, sortWorkers);
 
     // ---- program change and controller index ----
-    progress = 0.90f;
+    progress = 0.92f;
     for (size_t i = 0; i < out.events.size(); i++) {
         if (out.events[i]->isProgramChange() || out.events[i]->isController() || out.events[i]->isPitchBend()) {
             out.programChangeIdx.push_back(i);
@@ -314,7 +333,7 @@ MidiData parseMidi(const std::string& path, std::atomic<float>& progress,
     // PFA walks note-bearing (track,channel) pairs in track-major order: the first
     // 16 take the fixed default palette, the rest get a fresh random colour. srand
     // is seeded from the clock so colours past channel 16 differ every load.
-    progress = 0.95f;
+    progress = 0.96f;
     out.trackCount = maxTrack + 1;
     out.trackColors.assign(static_cast<size_t>(out.trackCount) * 16, 0xFFFFFFFFu);
 
