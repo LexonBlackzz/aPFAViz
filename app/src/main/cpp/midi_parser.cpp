@@ -56,10 +56,9 @@ struct Reader {
 struct TempoEvent { uint32_t tick; uint32_t usPerQuarter; };
 struct TempoSeg   { uint32_t tick; uint64_t usAtTick; uint32_t usPerQuarter; };
 
-// During parsing link holds the paired event's POOL INDEX. Once the
-// time-order table is built, a final inverse-map pass converts both sides of
-// every note pair to positions in events[]. No runtime pointer is stored in an
-// event, which is what lets PlayEvent stay 16 bytes on both 32- and 64-bit.
+// During parsing a note-on's link temporarily holds its paired note-off POOL
+// INDEX. After ticks are converted to microseconds, it is replaced by the
+// note-off's absolute end time. Note-off events themselves need no back-link.
 uint32_t pushNoteOn(std::vector<PlayEvent>& pool, uint32_t tick,
                     int key, int vel, int track, int channel) {
     int      c   = channel & 0x0F;
@@ -267,6 +266,18 @@ MidiData parseMidi(const std::string& path, std::atomic<float>& progress,
             progress = 0.62f + 0.12f * float(i) / float(poolN ? poolN : 1);
     }
 
+    // Replace temporary note pair indices with direct end timestamps.
+    // This removes a random partner-event dereference for every visible note on
+    // every frame.
+    for (PlayEvent& e : out.eventPool) {
+        if (e.isNoteOn()) {
+            if (e.link < poolN) e.link = out.eventPool[e.link].absMicroSec;
+            else                e.link = e.absMicroSec;
+        } else if (e.isNoteOff()) {
+            e.link = kNoEventLink;
+        }
+    }
+
     // ---- time-sorted pointer table (the playback walk order) ----
     progress = 0.74f;
     out.events.resize(poolN);
@@ -285,23 +296,6 @@ MidiData parseMidi(const std::string& path, std::atomic<float>& progress,
                       return a->track < b->track;  // lower track = drawn first = underneath
                   return a->channelEventType > b->channelEventType;  // non-notes first, note-on, note-off last
               });
-
-    // Convert parse-order partner indices to time-order positions. This is the
-    // only temporary 4 B/event table the in-RAM path needs; it is released
-    // immediately after linking.
-    {
-        std::vector<uint32_t> inv(poolN);
-        PlayEvent* const base = out.eventPool.data();
-        for (size_t pos = 0; pos < poolN; pos++) {
-            size_t poolIdx = static_cast<size_t>(out.events[pos] - base);
-            inv[poolIdx] = static_cast<uint32_t>(pos);
-        }
-        for (PlayEvent& e : out.eventPool) {
-            if (!e.isNoteOn() && !e.isNoteOff()) continue;
-            if (e.link >= poolN) { e.link = kNoEventLink; continue; }
-            e.link = inv[e.link];
-        }
-    }
 
     // ---- program change and controller index ----
     progress = 0.90f;
