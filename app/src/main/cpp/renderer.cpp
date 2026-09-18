@@ -447,7 +447,17 @@ bool RendererES2::buildPrograms() {
     skewProg_ = linkProgram(kSkewVS, kSkewFS, skewB, 9);
     textProg_ = linkProgram(kTextVS, kTextFS, textB, 4);
     bgProg_   = linkProgram(kBgVS,   kBgFS,   bgB,   1);
-    return noteProg_ && rectProg_ && gradProg_ && skewProg_ && textProg_ && bgProg_;
+    if (!(noteProg_ && rectProg_ && gradProg_ && skewProg_ && textProg_ && bgProg_))
+        return false;
+
+    noteUClock_    = glGetUniformLocation(noteProg_, "uClockSec");
+    noteUWindow_   = glGetUniformLocation(noteProg_, "uWindowSec");
+    noteUKbFrac_   = glGetUniformLocation(noteProg_, "uKbFrac");
+    noteUViewport_ = glGetUniformLocation(noteProg_, "uViewportPx");
+    noteUWhiteKey_ = glGetUniformLocation(noteProg_, "uWhiteKeyPx");
+    bgUYBottom_    = glGetUniformLocation(bgProg_, "uYBottom");
+    bgUTex_        = glGetUniformLocation(bgProg_, "uTex");
+    return true;
 }
 
 // ---- EGL init ---------------------------------------------------------------
@@ -1213,10 +1223,10 @@ void RendererES2::render(float clockSec, float totalSec, float fps,
         // One quad stretched across the note field (aspect not preserved). The
         // octave-split lines are skipped so the image reads cleanly behind notes.
         glUseProgram(bgProg_);
-        glUniform1f(glGetUniformLocation(bgProg_, "uYBottom"), 2.0f * kbFrac_ - 1.0f);
+        glUniform1f(bgUYBottom_, 2.0f * kbFrac_ - 1.0f);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, bgTex_);
-        glUniform1i(glGetUniformLocation(bgProg_, "uTex"), 0);
+        glUniform1i(bgUTex_, 0);
         // Plain (non-instanced) unit quad — bgProg only reads aQuad (location 0).
         // glDrawArrays on a triangle strip is core ES 2.0, so no instancing needed.
         for (GLuint i = 0; i <= 8; i++) glDisableVertexAttribArray(i);
@@ -1254,17 +1264,15 @@ void RendererES2::render(float clockSec, float totalSec, float fps,
     // ---- note field — whites first, then sharps on top (PFA layering) ----
     if (!whiteNotes.empty() || !sharpNotes.empty()) {
         glUseProgram(noteProg_);
-        glUniform1f(glGetUniformLocation(noteProg_, "uClockSec"), clockSec);
-        glUniform1f(glGetUniformLocation(noteProg_, "uWindowSec"),
-                    windowSec > 1e-6f ? windowSec : 1e-6f);
-        glUniform1f(glGetUniformLocation(noteProg_, "uKbFrac"), kbFrac_);
-        glUniform2f(glGetUniformLocation(noteProg_, "uViewportPx"),
-                    (float)width_, (float)height_);
+        glUniform1f(noteUClock_, clockSec);
+        glUniform1f(noteUWindow_, windowSec > 1e-6f ? windowSec : 1e-6f);
+        glUniform1f(noteUKbFrac_, kbFrac_);
+        glUniform2f(noteUViewport_, (float)width_, (float)height_);
         float whiteKeyPx = 0.0f;
         for (int k = startNote_; k <= endNote_; k++) {
             if (!pfaIsSharp(k)) { whiteKeyPx = keyW_[k] * (float)width_; break; }
         }
-        glUniform1f(glGetUniformLocation(noteProg_, "uWhiteKeyPx"), whiteKeyPx);
+        glUniform1f(noteUWhiteKey_, whiteKeyPx);
 
         auto widen = [&](const std::vector<NoteInstance>& src) {
             notesScratch_.clear();
