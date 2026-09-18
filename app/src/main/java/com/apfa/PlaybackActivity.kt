@@ -28,6 +28,8 @@ import android.widget.ProgressBar
 import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
+import com.example.liquidglass.GlassMaterial
+import com.example.liquidglass.LiquidGlassView
 import android.os.Environment
 import android.provider.OpenableColumns
 import java.io.File
@@ -36,10 +38,10 @@ import java.io.FileOutputStream
 import java.io.InputStream
 
 /**
- * Loading screen -> GL playback surface. The HUD (Time + FPS) is rendered
- * directly by the native engine every frame, like PFA's RenderText(). The
- * seek bar is polled from the UI thread at 16 ms (display rate) — it's a
- * UI control, not a timing-critical element, so this is fine.
+ * Loading -> Ready -> GL playback surface. Launcher/Ready chrome may use
+ * LiquidGlass because no timing-critical SurfaceView exists there yet. Live playback
+ * keeps lightweight Android chrome over the native SurfaceView so backdrop effects
+ * never add capture/compositing work to the PFA-faithful render loop.
  */
 class PlaybackActivity : Activity(), SurfaceHolder.Callback {
 
@@ -261,28 +263,23 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
 
     private fun showLoadingScreen() {
         val root = FrameLayout(this).apply { setBackgroundColor(Color.rgb(7, 9, 15)) }
-        root.background = GradientDrawable(
-            GradientDrawable.Orientation.TL_BR,
-            intArrayOf(Color.rgb(20, 16, 38), Color.rgb(7, 9, 15), Color.rgb(8, 24, 28))
-        )
+        val backdrop = addLiquidBackdrop(root)
 
         val card = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(dp(28), dp(26), dp(28), dp(26))
-            background = transportPanelBackground()
-            elevation = dp(10).toFloat()
+            setPadding(dp(30), dp(28), dp(30), dp(28))
         }
         card.addView(TextView(this).apply {
             text = "aPFA"
             setTextColor(Color.WHITE)
-            textSize = 30f
+            textSize = 31f
             typeface = Typeface.DEFAULT_BOLD
             letterSpacing = 0.03f
         })
         card.addView(TextView(this).apply {
             text = "Preparing the engine"
-            setTextColor(Color.rgb(176, 184, 205))
+            setTextColor(Color.rgb(199, 205, 221))
             textSize = 13f
         }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -293,8 +290,8 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
             isIndeterminate = true
             indeterminateTintList = ColorStateList.valueOf(Color.rgb(45, 212, 191))
         }
-        card.addView(spinner, LinearLayout.LayoutParams(dp(42), dp(42)).apply {
-            topMargin = dp(20)
+        card.addView(spinner, LinearLayout.LayoutParams(dp(44), dp(44)).apply {
+            topMargin = dp(22)
             bottomMargin = dp(14)
         })
 
@@ -306,9 +303,19 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
         }
         card.addView(loadingText)
 
-        root.addView(card, FrameLayout.LayoutParams(
-            dp(300), ViewGroup.LayoutParams.WRAP_CONTENT
+        val glass = liquidSurface(
+            content = card,
+            backdrop = backdrop,
+            tint = Color.rgb(22, 25, 40),
+            strength = 0.24f,
+            cornerDp = 28,
+            interactive = false
+        )
+        root.addView(glass, FrameLayout.LayoutParams(
+            dp(316), ViewGroup.LayoutParams.WRAP_CONTENT
         ).apply { gravity = Gravity.CENTER })
+        animateGlassIn(glass, 0L)
+
         setContentView(root)
         ui.post(loadingPoll)
     }
@@ -359,37 +366,53 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
     ) {
         ui.removeCallbacks(loadingPoll)
 
-        val root = FrameLayout(this).apply {
-            background = GradientDrawable(
-                GradientDrawable.Orientation.TL_BR,
-                intArrayOf(Color.rgb(20, 16, 38), Color.rgb(7, 9, 15), Color.rgb(8, 24, 28))
-            )
-        }
+        val root = FrameLayout(this).apply { setBackgroundColor(Color.rgb(7, 9, 15)) }
+        val backdrop = addLiquidBackdrop(root)
         val page = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(20), dp(20), dp(20))
+            setPadding(dp(20), dp(20), dp(20), dp(96))
         }
 
-        page.addView(TextView(this).apply {
+        val top = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val titleBlock = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        titleBlock.addView(TextView(this).apply {
             text = "aPFA"
             setTextColor(Color.WHITE)
             textSize = 27f
             typeface = Typeface.DEFAULT_BOLD
         })
-        page.addView(TextView(this).apply {
-            text = "Ready to play"
-            setTextColor(Color.rgb(188, 194, 212))
-            textSize = 13f
-        }, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.WRAP_CONTENT,
+        titleBlock.addView(TextView(this).apply {
+            text = "READY"
+            setTextColor(Color.rgb(45, 212, 191))
+            textSize = 10f
+            typeface = Typeface.DEFAULT_BOLD
+            letterSpacing = 0.18f
+        })
+        top.addView(titleBlock, LinearLayout.LayoutParams(0,
+            ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        top.addView(TextView(this).apply {
+            text = "Loaded"
+            setTextColor(Color.rgb(219, 224, 237))
+            textSize = 12f
+            gravity = Gravity.CENTER
+            setPadding(dp(14), 0, dp(14), 0)
+            background = GradientDrawable().apply {
+                cornerRadius = dp(999).toFloat()
+                setColor(Color.argb(70, 45, 212, 191))
+                setStroke(dp(1), Color.argb(115, 45, 212, 191))
+            }
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(34)))
+        page.addView(top, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT
         ).apply { bottomMargin = dp(18) })
 
         val fileCard = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(16), dp(16), dp(16))
-            background = transportPanelBackground()
-            elevation = dp(8).toFloat()
+            setPadding(dp(18), dp(18), dp(18), dp(18))
         }
         val fileHeader = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -398,20 +421,20 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
         fileHeader.addView(TextView(this).apply {
             text = midiName
             setTextColor(Color.WHITE)
-            textSize = 18f
+            textSize = 19f
             typeface = Typeface.DEFAULT_BOLD
             maxLines = 2
             ellipsize = android.text.TextUtils.TruncateAt.END
         }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        val change = Button(this).apply {
+        fileHeader.addView(TextView(this).apply {
             text = "Change"
-            isAllCaps = false
-            setTextColor(Color.rgb(203, 208, 223))
+            setTextColor(Color.rgb(216, 222, 236))
             textSize = 12f
-            background = null
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setPadding(dp(12), 0, dp(12), 0)
             setOnClickListener { finish() }
-        }
-        fileHeader.addView(change)
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(40)))
         fileCard.addView(fileHeader)
 
         val noteCount = nativeGetNoteCount()
@@ -429,105 +452,232 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
                     append(formatBytes(midiBytes))
                 }
             }
-            setTextColor(Color.rgb(203, 208, 223))
+            setTextColor(Color.rgb(213, 219, 233))
             textSize = 13f
         }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT
-        ).apply { topMargin = dp(10) })
+        ).apply { topMargin = dp(12) })
 
         fileCard.addView(TextView(this).apply {
             text = if (streamedMb > 0)
                 "%.1f MB RAM   •   %.1f MB streamed".format(memoryMb, streamedMb)
             else
                 "%.1f MB RAM".format(memoryMb)
-            setTextColor(Color.rgb(166, 174, 195))
+            setTextColor(Color.rgb(177, 185, 205))
             textSize = 12f
         }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT
-        ).apply { topMargin = dp(5) })
+        ).apply { topMargin = dp(6) })
 
-        page.addView(fileCard, LinearLayout.LayoutParams(
+        val fileGlass = liquidSurface(
+            fileCard, backdrop, Color.rgb(24, 27, 43), 0.25f, 24, false
+        )
+        page.addView(fileGlass, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT
         ))
 
-        // SoundFont is a compact setting here rather than a second primary action.
         page.addView(TextView(this).apply {
-            text = "SoundFont"
-            setTextColor(Color.rgb(166, 174, 195))
-            textSize = 12f
+            text = "SOUNDFONT"
+            setTextColor(Color.rgb(170, 179, 200))
+            textSize = 10f
+            typeface = Typeface.DEFAULT_BOLD
+            letterSpacing = 0.12f
         }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT
-        ).apply { topMargin = dp(18) })
-        page.addView(TextView(this).apply {
-            text = soundfontName ?: "No SoundFont"
+        ).apply { topMargin = dp(20); bottomMargin = dp(7) })
+
+        val sfChipContent = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(14), dp(9), dp(14), dp(9))
+        }
+        sfChipContent.addView(TextView(this).apply {
+            text = "SF"
             setTextColor(Color.rgb(45, 212, 191))
+            textSize = 11f
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+        }, LinearLayout.LayoutParams(dp(34), dp(34)).apply { marginEnd = dp(9) })
+        sfChipContent.addView(TextView(this).apply {
+            text = soundfontName ?: "No SoundFont"
+            setTextColor(Color.WHITE)
             textSize = 14f
             typeface = Typeface.DEFAULT_BOLD
             maxLines = 1
             ellipsize = android.text.TextUtils.TruncateAt.END
+        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        val sfGlass = liquidSurface(
+            sfChipContent, backdrop, Color.rgb(16, 36, 38), 0.22f, 19, false
+        )
+        page.addView(sfGlass)
+
+        page.addView(TextView(this).apply {
+            text = "QUICK SETTINGS"
+            setTextColor(Color.rgb(170, 179, 200))
+            textSize = 10f
+            typeface = Typeface.DEFAULT_BOLD
+            letterSpacing = 0.12f
         }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT
-        ).apply { topMargin = dp(4) })
+        ).apply { topMargin = dp(20); bottomMargin = dp(7) })
 
         val quick = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(16), dp(16), dp(16))
-            background = transportPanelBackground()
+            setPadding(dp(18), dp(16), dp(18), dp(16))
         }
-        quick.addView(TextView(this).apply {
-            text = "Quick settings"
-            setTextColor(Color.WHITE)
-            textSize = 16f
-            typeface = Typeface.DEFAULT_BOLD
-        })
-        quick.addView(TextView(this).apply {
-            text = "Voice Count   $voiceCount"
-            setTextColor(Color.rgb(203, 208, 223))
-            textSize = 13f
+        quick.addView(readyMetricRow("Voice Count", "$voiceCount voices"))
+        quick.addView(View(this).apply {
+            setBackgroundColor(Color.argb(34, 255, 255, 255))
         }, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT
-        ).apply { topMargin = dp(12) })
-        quick.addView(TextView(this).apply {
-            text = "Note Speed   %.3f×".format(noteSpeed)
-            setTextColor(Color.rgb(203, 208, 223))
-            textSize = 13f
-        }, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT
-        ).apply { topMargin = dp(8) })
-        page.addView(quick, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT
-        ).apply { topMargin = dp(18) })
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(1)
+        ).apply { topMargin = dp(11); bottomMargin = dp(11) })
+        quick.addView(readyMetricRow("Note Speed", "%.3f×".format(noteSpeed)))
+
+        val quickGlass = liquidSurface(
+            quick, backdrop, Color.rgb(22, 25, 40), 0.22f, 22, false
+        )
+        page.addView(quickGlass)
 
         root.addView(page, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT
         ).apply { gravity = Gravity.TOP })
 
-        val play = Button(this).apply {
-            text = "Play"
-            isAllCaps = false
+        val playContent = TextView(this).apply {
+            text = "▶   Play"
+            gravity = Gravity.CENTER
+            setTextColor(Color.WHITE)
             textSize = 17f
             typeface = Typeface.DEFAULT_BOLD
-            setTextColor(Color.WHITE)
-            setOnClickListener { showPlaybackScreen() }
         }
-        styleTransportButton(play)
-        root.addView(play, FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, dp(58)
+        val playGlass = liquidSurface(
+            playContent, backdrop, Color.rgb(139, 92, 246), 0.46f, 22, true
+        ).apply {
+            setOnClickListener { showPlaybackScreen() }
+            elevation = dp(12).toFloat()
+        }
+        root.addView(playGlass, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(62)
         ).apply {
             gravity = Gravity.BOTTOM
             setMargins(dp(20), 0, dp(20), dp(20))
         })
 
         setContentView(root)
+        animateGlassIn(fileGlass, 20L)
+        animateGlassIn(sfGlass, 80L)
+        animateGlassIn(quickGlass, 140L)
+        animateGlassIn(playGlass, 210L)
+    }
+
+    private fun readyMetricRow(label: String, value: String): LinearLayout =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(TextView(this@PlaybackActivity).apply {
+                text = label
+                setTextColor(Color.rgb(208, 214, 229))
+                textSize = 13f
+            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            addView(TextView(this@PlaybackActivity).apply {
+                text = value
+                setTextColor(Color.rgb(45, 212, 191))
+                textSize = 13f
+                typeface = Typeface.DEFAULT_BOLD
+            })
+        }
+
+    private fun addLiquidBackdrop(root: FrameLayout): FrameLayout {
+        val stage = FrameLayout(this).apply {
+            background = GradientDrawable(
+                GradientDrawable.Orientation.TL_BR,
+                intArrayOf(
+                    Color.rgb(26, 18, 47),
+                    Color.rgb(7, 9, 15),
+                    Color.rgb(7, 30, 32)
+                )
+            )
+        }
+        root.addView(stage, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        ))
+
+        fun glow(color: Int, size: Int, gravity: Int, x: Int, y: Int) {
+            stage.addView(View(this).apply {
+                alpha = 0.72f
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.OVAL
+                    gradientType = GradientDrawable.RADIAL_GRADIENT
+                    gradientRadius = dp(size).toFloat() * 0.52f
+                    colors = intArrayOf(color, Color.TRANSPARENT)
+                }
+            }, FrameLayout.LayoutParams(dp(size), dp(size)).apply {
+                this.gravity = gravity
+                setMargins(x, y, x, y)
+            })
+        }
+
+        glow(Color.argb(125, 139, 92, 246), 260, Gravity.TOP or Gravity.END, dp(-50), dp(-45))
+        glow(Color.argb(105, 45, 212, 191), 230, Gravity.BOTTOM or Gravity.START, dp(-55), dp(10))
+        stage.addView(View(this).apply {
+            background = GradientDrawable(
+                GradientDrawable.Orientation.TOP_BOTTOM,
+                intArrayOf(Color.argb(50, 255, 255, 255), Color.TRANSPARENT, Color.argb(70, 0, 0, 0))
+            )
+        }, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        ))
+        return stage
+    }
+
+    private fun liquidSurface(
+        content: View,
+        backdrop: View,
+        tint: Int,
+        strength: Float,
+        cornerDp: Int,
+        interactive: Boolean
+    ): LiquidGlassView =
+        LiquidGlassView(this).apply {
+            cornerRadius = dp(cornerDp).toFloat()
+            material = GlassMaterial.REGULAR
+            blurAmount = 0.13f
+            saturation = 126f
+            refractionHeight = dp(if (interactive) 29 else 23).toFloat()
+            bevelWidth = dp(if (interactive) 20 else 18).toFloat()
+            refractionFalloff = 2.65f
+            dispersionStrength = if (interactive) 0.14f else 0.085f
+            enableSensorHighlight = false
+            enableAdaptiveTint = false
+            enableDynamicBackground = false
+            enablePressEffect = interactive
+            pressScale = if (interactive) 0.965f else 1f
+            collectFrameStats = false
+            backdropSource = backdrop
+            setGlassTint(tint, strength)
+            addView(content, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            ))
+        }
+
+    private fun animateGlassIn(view: View, delayMs: Long) {
+        view.alpha = 0f
+        view.translationY = dp(14).toFloat()
+        view.postDelayed({
+            view.animate()
+                .alpha(1f)
+                .translationY(0f)
+                .setDuration(300L)
+                .start()
+        }, delayMs)
     }
 
     private fun formatDuration(micros: Long): String {
