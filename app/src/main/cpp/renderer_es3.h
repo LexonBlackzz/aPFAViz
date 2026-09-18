@@ -32,7 +32,8 @@ public:
 
     void render(float clockSec, float totalSec, float fps,
                 float windowSec,
-                const std::vector<NoteInstance>& notes,
+                const std::vector<NoteInstance>& whiteNotes,
+                const std::vector<NoteInstance>& sharpNotes,
                 const uint32_t keyColor[128]) override;
 
 private:
@@ -105,7 +106,6 @@ private:
     int   startNote_ = 21, endNote_ = 108;
 
     // Per-frame scratch buffers
-    std::vector<NoteInstance>  notesScratch_;
     std::vector<RectInstance>  rects_;
     std::vector<GradInstance>  grads_;
     std::vector<SkewInstance>  skews_;
