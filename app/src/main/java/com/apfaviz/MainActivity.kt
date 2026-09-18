@@ -1098,9 +1098,9 @@ class MainActivity : Activity() {
 
     // --- Advanced Settings dialog ---------------------------------------------
     // Legacy Renderer: ES2 fallback for GPUs (Mali-400 / MT6570) that can't
-    // create an ES3 context. Chunked Disk Streaming: allow the on-disk chunked
-    // pagefile sort for MIDIs too big even for normal (automatic) disk
-    // streaming — the one hop between little Timmy and a 12 GB pagefile.
+    // create an ES3 context. Large streaming loads now chunk automatically when
+    // their sort scratch would become too large; this switch forces the same
+    // disk-backed sort for smaller streaming loads as well.
     // Pagefile Location: sits under that as Internal / SD Card, for the phones
     // whose internal storage was never going to hold it (SdCard.kt).
     private fun showAdvancedSettingsDialog() {
@@ -1118,20 +1118,20 @@ class MainActivity : Activity() {
         container.addView(legacyBox)
 
         val streamBox = CheckBox(this)
-        streamBox.text = "Chunked Disk Streaming"
+        streamBox.text = "Force Chunked Disk Sort"
         streamBox.isChecked = chunkedStreaming
         streamBox.setOnCheckedChangeListener { _, checked ->
             if (checked && !chunkedStreaming) {
                 AlertDialog.Builder(this)
-                    .setTitle("Chunked Disk Streaming")
-                    .setMessage("Sorts a huge MIDI's pagefile in chunks on " +
-                                "disk instead of in RAM, so Black MIDIs too " +
-                                "big for normal disk streaming can load, " +
-                                "the only limit is your free storage.\n\n" +
-                                "WARNING: loading such MIDIs can take VERY " +
-                                "large amounts of storage, stability issues " +
-                                "may occur, and loading times could be very " +
-                                "long.\n\n" +
+                    .setTitle("Force Chunked Disk Sort")
+                    .setMessage("Forces the streaming sort to use bounded " +
+                                "disk-backed chunks even when the MIDI is small " +
+                                "enough to sort in RAM. Very large loads already " +
+                                "switch to chunked sorting automatically to keep " +
+                                "parse RAM under control.\n\n" +
+                                "This can lower peak RAM further, at the cost of " +
+                                "more temporary storage writes and longer loading " +
+                                "times.\n\n" +
                                 // Only on a 32-bit phone, because the pagefile
                                 // is only ever split there (streamer.cpp,
                                 // poolFileBytes()).
