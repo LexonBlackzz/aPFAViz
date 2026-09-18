@@ -203,8 +203,10 @@ private:
     int      fpsFrames_ = 0;
     uint64_t fpsLastUs_ = 0;
     uint64_t cpuLastUs_ = 0;
-    uint64_t sumDispatchUs_ = 0, sumBuildUs_ = 0;
-    uint64_t maxDispatchUs_ = 0, maxBuildUs_ = 0;
+    uint64_t sumDispatchUs_ = 0, sumBuildUs_ = 0, sumRenderUs_ = 0;
+    uint64_t maxDispatchUs_ = 0, maxBuildUs_ = 0, maxRenderUs_ = 0;
+    uint64_t visibleSum_ = 0;
+    size_t   visibleMax_ = 0;
     // The "state:" and "fault:" lines. state: is the twin of PFA's PerfLog
     // state: line (winport/PerfLog.h) so an aPFA log and a desktop PFA log of
     // the same MIDI line up column for column. fault: has no PFA twin — desktop
