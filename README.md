@@ -18,4 +18,4 @@ aPFAs current features as of **v1.3.1** are:
 
 ## Android requirement
 
-This UI refresh raises the minimum supported version to **Android 6.0 (API 23)**. The native playback engine remains the same; the higher floor removes the pre-KitKat/Gingerbread UI compatibility paths and makes future interface work much simpler.
+The Liquid Glass UI experiment raises the minimum supported version to **Android 7.0 (API 24)**. The native playback engine remains the same. Launcher glass is provided by QWEA0/Liquid-Glass-Android (MIT); the live piano-roll surface intentionally stays on lightweight native/translucent chrome so UI effects do not add capture/compositing work to PFA-faithful playback.
