@@ -2,6 +2,7 @@
 #include "engine.h"
 #include "note.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <new>
@@ -67,28 +68,30 @@ void Engine::syncBgImage() {
 }
 
 #ifdef APFA_STREAMING
-// Fraction of total device RAM the predicted in-RAM parse may use before the
-// load is routed to the streaming pool instead (Engine::load). ~40% of an
-// 8 GB phone ≈ the 3 GB the flushed-cache ceiling actually allows.
-static constexpr double kStreamRamFraction = 0.40;
+// Fraction of total device RAM allowed for the predicted permanent in-RAM
+// event representation. A second fixed soft cap matters on high-RAM phones:
+// "40% of 8 GB" is technically available, but letting a Black MIDI parser peak
+// beyond a gigabyte is still unfriendly to Android. Low-memory devices remain
+// protected by the stricter 40%-of-physical-RAM limit below.
+static constexpr double   kStreamRamFraction      = 0.40;
+static constexpr uint64_t kInRamResidentSoftCap  = 1ull << 30;
 
-// Peak non-pool cost of an UN-chunked streaming parse, per event. The sort
-// keys and pairs are the transient the name refers to, but they are not the
-// whole bill: events[] and sisterPos_ live for the entire session and inv[]
-// lives through pass D, and leaving those three out is how a 29.3M-event MIDI
-// got routed down the un-chunked path on a device that could not hold it
-// (predicted 586 MB, actually needed 782 MB, died). Derived rather than
-// written as a number so it cannot drift from the structures again.
-//
-// Re-check against the two reference loads before touching this: RDR 40M
-// (80M events) stays un-chunked on an 8 GB phone, NoK 90M still selects the
-// chunked on-disk sort ("Chunked Disk Streaming").
+// Automatic streaming-sort spill threshold. SortKey is 12 B/event and Pair is
+// 8 B/note (~4 B/event for note-heavy files), so ~16 B/event is a good upper
+// estimate of the purely temporary resident sort/pair payload. Prefer RAM for
+// speed until the scratch itself approaches 1 GB; the device-relative budget
+// below still forces chunking much earlier on low-memory phones.
+static constexpr uint64_t kSortScratchPerEvent    = 16;
+static constexpr uint64_t kAutoChunkScratchCap    = 1ull << 30;
+
+// Peak non-pool cost of an UN-chunked streaming parse, per event. This includes
+// permanent tables that overlap the sort plus the transient sort/pair payload.
 static constexpr uint64_t kSortTransientPerEvent =
-      16                       // SortKey{uint64 key, uint32 idx}, one per event
-    + 4                        // Pair{uint32,uint32}, one per note = ~4 B/event
+      12                       // compact SortKey
+    + 4                        // Pair average (~one 8 B pair per two events)
     + sizeof(PlayEvent*)       // MidiData::events
     + 4                        // Streamer::sisterPos_
-    + 4;                       // inv[], the pass-D inverse map
+    + 4;                       // inv[], pass-D inverse map
 
 // ---- adaptive-load crash marker (see Engine::load) --------------------------
 // Written before a parse attempt, deleted once playback starts or the engine
@@ -167,12 +170,10 @@ bool Engine::load(const std::string& midiPath, const std::string& soundfontPath,
     //      the marker is written before parsing and only survives a process
     //      death; it is cleared once playback starts or on clean teardown,
     //      so ordinary backgrounded-app kills never flip the mode.
-    // A streaming load then sorts in RAM (the old ceiling) unless the skim
-    // predicts even that transient can't fit — the truly giant MIDIs — where
-    // the chunked on-disk sort takes over IF the user opted into it
-    // ("Chunked Disk Streaming" in Advanced Settings); with the toggle off
-    // the load is refused with kLoadNeedsChunked instead of dying to lmkd
-    // on every attempt.
+    // A streaming load automatically spills the sort once its temporary key/pair
+    // payload crosses a conservative cap or the predicted working set exceeds
+    // the device budget. The Advanced Settings switch can still force chunked
+    // sorting for smaller streaming loads.
     markerPath_ = loadMarkerPath(midiPath);
     uint64_t fp = midiFingerprint(midiPath);
     uint64_t events = Streamer::predictEventCount(midiPath);
@@ -189,14 +190,15 @@ bool Engine::load(const std::string& midiPath, const std::string& soundfontPath,
         LOGI("previous load of this MIDI died — using the streaming pool");
         wantStream = true;
     } else if (events > 0 && totalRam > 0) {
-        uint64_t predictedBytes =
+        const uint64_t predictedBytes =
             events * (sizeof(PlayEvent) + sizeof(PlayEvent*));
-        predictedTooBig = predictedBytes > budget;
+        const uint64_t inRamLimit = std::min<uint64_t>(budget, kInRamResidentSoftCap);
+        predictedTooBig = predictedBytes > inRamLimit;
         if (predictedTooBig) {
-            LOGI("predicted in-RAM footprint %.1f MB > %.1f MB budget "
-                 "(%.0f%% of %.1f GB RAM) — using the streaming pool",
-                 predictedBytes / 1048576.0, budget / 1048576.0,
-                 kStreamRamFraction * 100.0, totalRam / 1073741824.0);
+            LOGI("predicted in-RAM resident core %.1f MB > %.1f MB soft limit "
+                 "(device budget %.1f MB) — using the streaming pool",
+                 predictedBytes / 1048576.0, inRamLimit / 1048576.0,
+                 budget / 1048576.0);
             wantStream = true;
         }
     }
@@ -205,19 +207,24 @@ bool Engine::load(const std::string& midiPath, const std::string& soundfontPath,
     // in-RAM parse can hand the load back to the streaming pool (see below),
     // and that path has to make this decision too — it was skipped the first
     // time round, when streaming was not yet on the table.
-    auto decideChunkedSort = [&]() -> bool {        // false => refuse, error set
+    auto decideChunkedSort = [&]() -> bool {
         chunked = false;
-        if (events > 0 && totalRam > 0 &&
-            events * kSortTransientPerEvent > budget) {
-            if (!allowChunked) {
-                LOGI("predicted sort transient %.1f MB > %.1f MB budget and "
-                     "Chunked Disk Streaming is off — refusing the load",
-                     events * kSortTransientPerEvent / 1048576.0,
-                     budget / 1048576.0);
-                loadError_ = kLoadNeedsChunked;
-                return false;
-            }
+        if (events == 0) return true;
+
+        const uint64_t scratchBytes = events * kSortScratchPerEvent;
+        const uint64_t workingBytes = events * kSortTransientPerEvent;
+        if (allowChunked ||
+            scratchBytes > kAutoChunkScratchCap ||
+            (totalRam > 0 && workingBytes > budget)) {
             chunked = true;
+            LOGI("stream sort: chunked (%s), scratch %.1f MB, working %.1f MB, "
+                 "budget %.1f MB",
+                 allowChunked ? "manual" :
+                 (scratchBytes > kAutoChunkScratchCap ? "automatic scratch cap" :
+                                                       "automatic RAM budget"),
+                 scratchBytes / 1048576.0,
+                 workingBytes / 1048576.0,
+                 budget / 1048576.0);
         }
         return true;
     };
@@ -261,19 +268,11 @@ bool Engine::load(const std::string& midiPath, const std::string& soundfontPath,
             }
             if (streamer_.noAddrSpace()) {
                 // The pool itself fits but the un-chunked sort table does not,
-                // and the chunked on-disk sort would. That is a mode problem,
-                // not an impossible load: take the other mode if the user has
-                // allowed it, and otherwise say which switch to flip rather
-                // than telling them to go find a 64-bit phone.
+                // and the chunked on-disk sort would. Retry automatically:
+                // memory safety is no longer gated behind a user toggle.
                 if (streamer_.needsChunked() && !chunked) {
-                    if (!allowChunked) {
-                        LOGI("needs the chunked on-disk sort to fit the address "
-                             "space, and Chunked Disk Streaming is off");
-                        loadError_ = kLoadNeedsChunked;
-                        return false;
-                    }
-                    LOGI("retrying with the chunked on-disk sort — it needs "
-                         "less address space than the in-RAM sort");
+                    LOGI("retrying automatically with the chunked on-disk sort — "
+                         "it needs less address space than the in-RAM sort");
                     chunked = true;
                     try {
                         opened = streamer_.open(midiPath, midi_, loadProgress_,
@@ -584,7 +583,7 @@ void Engine::threadMain() {
             renderer_->setBgColor(bgColor_.load());
             syncBgImage();
             renderer_->render(clockUs_ * 1e-6f, midi_.totalUs * 1e-6f, pubFps_.load(),
-                             3.0f * noteSpeed_, instances_, keyColor_);
+                             3.0f * noteSpeed_, whiteInstances_, sharpInstances_, keyColor_);
             usleep(10000);   // 10 ms idle — matches PFA's paused Sleep(10)
             lastWall_ = nowUs();
             continue;
@@ -614,7 +613,7 @@ void Engine::frame() {
     uint64_t tDisp = nowUs();
     dispatch();
     advancePcCursor();
-    synth_.flush();   // one raw BASS_MIDI_StreamEvents call for the whole frame
+    synth_.flush();   // one/few bounded raw BASS submissions for the frame
     uint64_t tBuild = nowUs();
     buildVisible();
     uint64_t tEnd = nowUs();
@@ -631,9 +630,16 @@ void Engine::frame() {
     syncBgImage();
     renderer_->render(clockUs_ * 1e-6f, midi_.totalUs * 1e-6f,
                      pubFps_.load(),
-                     3.0f * noteSpeed_, instances_, keyColor_);
+                     3.0f * noteSpeed_, whiteInstances_, sharpInstances_, keyColor_);
     // eglSwapBuffers is called inside renderer_->render(); it stalls here until
     // vblank. That stall is part of lastWall_ -> now on the next frame.
+    uint64_t tPresented = nowUs();
+    uint64_t rUs = tPresented - tEnd;
+    sumRenderUs_ += rUs;
+    if (rUs > maxRenderUs_) maxRenderUs_ = rUs;
+    size_t visibleNow = whiteInstances_.size() + sharpInstances_.size();
+    visibleSum_ += visibleNow;
+    if (visibleNow > visibleMax_) visibleMax_ = visibleNow;
 
     // --- metrics ---
     pubTimeUs_.store(static_cast<int64_t>(clockUs_));
@@ -663,10 +669,11 @@ void Engine::frame() {
         fpsFrames_ = 0;
         uint64_t sc = 0, su = 0, bp = 0;
         synth_.sampleEventCost(sc, su, bp);
-        LOGI("perf: %.0f fps | engine %.0f%% cpu | synth %llu calls %.1f ms total (%.1f%% wall)",
+        LOGI("perf: %.0f fps | engine %.0f%% cpu | synth %llu events / %llu batches, %.1f ms submit (%.1f%% wall)",
              pubFps_.load(), cpuDelta * 100.0 / static_cast<double>(window),
-             static_cast<unsigned long long>(sc), su / 1000.0,
-             su * 100.0 / static_cast<double>(window));
+             static_cast<unsigned long long>(sc),
+             static_cast<unsigned long long>(bp),
+             su / 1000.0, su * 100.0 / static_cast<double>(window));
         double inv = frames > 0 ? 1.0 / frames : 0.0;
         // Only when the overload guard actually had to thin the audio — a
         // silent log here means BASSMIDI kept up on its own.
@@ -675,9 +682,13 @@ void Engine::frame() {
         if (gFloor < voiceCount_)
             LOGI("guard: voices %d now, %d low this window (ceiling %d)",
                  gVoices, gFloor, voiceCount_);
-        LOGI("frame: dispatch %.1f/%.1f | build %.1f/%.1f ms avg/max",
+        LOGI("frame: dispatch %.1f/%.1f | build %.1f/%.1f | render %.1f/%.1f ms avg/max",
              sumDispatchUs_ * inv / 1000.0, maxDispatchUs_ / 1000.0,
-             sumBuildUs_    * inv / 1000.0, maxBuildUs_    / 1000.0);
+             sumBuildUs_    * inv / 1000.0, maxBuildUs_    / 1000.0,
+             sumRenderUs_   * inv / 1000.0, maxRenderUs_   / 1000.0);
+        LOGI("visible: %llu avg | %zu max",
+             static_cast<unsigned long long>(frames > 0 ? visibleSum_ / frames : 0),
+             visibleMax_);
         // Twin of PFA's PerfLog "state:" line — same columns, same order.
         LOGI("state: poly %llu avg %llu max | %.0f ev/s",
              static_cast<unsigned long long>(frames > 0 ? polySum_ / frames : 0),
@@ -706,8 +717,10 @@ void Engine::frame() {
                  streamer_.windowBytes() / 1048576.0,
                  streamer_.memAvailBytes() / 1048576.0);
 #endif
-        sumDispatchUs_ = sumBuildUs_ = 0;
-        maxDispatchUs_ = maxBuildUs_ = 0;
+        sumDispatchUs_ = sumBuildUs_ = sumRenderUs_ = 0;
+        maxDispatchUs_ = maxBuildUs_ = maxRenderUs_ = 0;
+        visibleSum_ = 0;
+        visibleMax_ = 0;
         polySum_ = polyMax_ = dispEvents_ = 0;
         noteOnsWindow_ = 0;
     }
@@ -741,18 +754,10 @@ void Engine::dispatch() {
                 ++noteOnsWindow_;
             } else {
                 synth_.noteOff(ch, key);
-                noteState_[key] = -1;
-                const PlayEvent* sister = e->sister;
-                size_t i = 0;
-                while (i < active_.size()) {
-                    PlayEvent* a = ev[active_[i]];
-                    if (a == sister) {
-                        active_.erase(active_.begin() + static_cast<long>(i));
-                    } else {
-                        if (a->param1 == key) noteState_[key] = active_[i];
-                        i++;
-                    }
-                }
+                // Do not scan/erase active_ here. On dense passages this used to
+                // walk and memmove the active-note vector once PER note-off,
+                // turning dispatch into O(noteOffs * polyphony). After all due
+                // events are dispatched we perform one stable O(P) compaction.
             }
             eventCursor_++;
         }
@@ -770,6 +775,25 @@ void Engine::dispatch() {
         break;
 #endif
     }
+    // Stable active-note compaction once per frame.
+    //
+    // eventCursor_ is now the first un-dispatched event. A note-on remains
+    // sounding iff its paired note-off position is >= eventCursor_. Keeping
+    // survivors in their original order preserves the exact active rendering
+    // order. Rebuilding noteState_ here yields the same "last active note for
+    // each key" result the old per-note-off scans produced.
+    for (int& state : noteState_) state = -1;
+    size_t write = 0;
+    for (size_t read = 0; read < active_.size(); read++) {
+        const int pos = active_[read];
+        const PlayEvent* a = ev[static_cast<size_t>(pos)];
+        if (static_cast<int64_t>(a->link) <= clockUs_)
+            continue;
+        active_[write++] = pos;
+        noteState_[a->param1] = pos;
+    }
+    active_.resize(write);
+
     dispEvents_ += eventCursor_ - startCursor;
 }
 
@@ -793,29 +817,11 @@ void Engine::buildVisible() {
     while (windowCursor_ < visEnd && ev[windowCursor_]->absMicroSec < windowEnd)
         windowCursor_++;
 
-    // Derive PFA's three colour levels from the primary packed colour.
-    // SetColor(color, dDark=0.6, dVeryDark=0.2) in PFA — same HSV, scaled V.
-    auto deriveColors = [](uint32_t primary, uint32_t& dark, uint32_t& veryDark) {
-        float r = ((primary >>  0) & 0xFF) / 255.0f;
-        float g = ((primary >>  8) & 0xFF) / 255.0f;
-        float b = ((primary >> 16) & 0xFF) / 255.0f;
-        float vmax = r > g ? (r > b ? r : b) : (g > b ? g : b);
-        float vmin = r < g ? (r < b ? r : b) : (g < b ? g : b);
-        float v = vmax, s = (vmax > 0.0f ? (vmax - vmin) / vmax : 0.0f);
-        float h = 0.0f;
-        if (vmax != vmin) {
-            float d = vmax - vmin;
-            if      (vmax == r) h = (g - b) / d + (g < b ? 6.0f : 0.0f);
-            else if (vmax == g) h = (b - r) / d + 2.0f;
-            else                h = (r - g) / d + 4.0f;
-            h /= 6.0f;
-        }
-        dark     = packHSV(h, s, v * 0.6f);
-        veryDark = packHSV(h, s, v * 0.2f);
+    auto colorIndexOf = [&](const PlayEvent& e) -> size_t {
+        return static_cast<size_t>(e.track) * 16 + e.channel;
     };
-
     auto colorOf = [&](const PlayEvent& e) -> uint32_t {
-        size_t idx = static_cast<size_t>(e.track) * 16 + e.channel;
+        size_t idx = colorIndexOf(e);
         return idx < colors.size() ? colors[idx] : 0xFFFFFFFFu;
     };
 
@@ -825,29 +831,37 @@ void Engine::buildVisible() {
         return pc==1||pc==3||pc==6||pc==8||pc==10;
     };
 
-    auto toInstance = [&](const PlayEvent& e) -> NoteInstance {
+    auto toInstance = [&](size_t pos) -> NoteInstance {
+        const PlayEvent& e = *ev[pos];
         NoteInstance ni;
         ni.startSec = e.absMicroSec * 1e-6f;
-        int64_t endUs = e.sister ? e.sister->absMicroSec : e.absMicroSec;
-        ni.durSec = static_cast<float>(endUs - e.absMicroSec) * 1e-6f;
+        const int64_t endUs = static_cast<int64_t>(e.link);
+        ni.durSec = static_cast<float>(endUs - static_cast<int64_t>(e.absMicroSec)) * 1e-6f;
         ni.key    = static_cast<float>(e.param1);
-        ni.colorPrimary = colorOf(e);
-        deriveColors(ni.colorPrimary, ni.colorDark, ni.colorVeryDark);
-        ni.isSharp = isSharpKey(e.param1) ? 1u : 0u;
+        size_t colorIdx = colorIndexOf(e);
+        ni.colorPrimary = colorIdx < colors.size() ? colors[colorIdx] : 0xFFFFFFFFu;
         return ni;
     };
 
-    instances_.clear();
+    whiteInstances_.clear();
+    sharpInstances_.clear();
     memset(keyColor_, 0, sizeof(keyColor_));
 
+    auto appendInstance = [&](size_t pos) {
+        const PlayEvent& e = *ev[pos];
+        NoteInstance ni = toInstance(pos);
+        if (isSharpKey(e.param1)) sharpInstances_.push_back(ni);
+        else                      whiteInstances_.push_back(ni);
+    };
+
     for (int idx : active_)
-        instances_.push_back(toInstance(*ev[idx]));
+        appendInstance(static_cast<size_t>(idx));
     for (int k = 0; k < 128; k++)
         if (noteState_[k] >= 0)
             keyColor_[k] = colorOf(*ev[noteState_[k]]);
     for (size_t j = eventCursor_; j < windowCursor_; j++) {
         const PlayEvent* e = ev[j];
-        if (e->isNoteOn()) instances_.push_back(toInstance(*e));
+        if (e->isNoteOn()) appendInstance(j);
     }
 }
 
@@ -908,20 +922,15 @@ void Engine::applySeek(int64_t target) {
         pubTimeUs_.store(static_cast<int64_t>(clockUs_));
         return;
     }
-    if (streamer_.isOpen()) {
-        // Identical result to the loop below, computed from the resident
-        // sister-position table instead of dereferencing every historical
-        // event (which would fault the whole cold pool in random order).
-        // A note-on at position j is still sounding iff its note-off sits at
-        // position >= lo: events[] is time-sorted, so "off position >= lo"
-        // and "off time > target" are the same predicate.
+    if (streamer_.isSliced()) {
+        // Sliced mode cannot dereference arbitrary historical events, so it
+        // retains the compact resident partner-position table.
         for (size_t j = 0; j < eventCursor_; j++) {
-            uint32_t s = streamer_.sisterPosAt(j);
-            if (s < Streamer::kSisNoteOff && static_cast<size_t>(s) >= eventCursor_)
+            uint32_t link = streamer_.sisterPosAt(j);
+            if (Streamer::linkIsNoteOn(link) &&
+                static_cast<size_t>(Streamer::linkPartner(link)) >= eventCursor_)
                 active_.push_back(static_cast<int>(j));
         }
-        // Warm what the next frame reads (visible band, the active notes and
-        // their offs) before the param1 dereferences below.
         streamer_.warmSeek(target,
                            target + static_cast<int64_t>(3000000.0 * noteSpeed_),
                            active_);
@@ -929,13 +938,25 @@ void Engine::applySeek(int64_t target) {
             noteState_[ev[j]->param1] = j;
     } else
 #endif
-    for (size_t j = 0; j < eventCursor_; j++) {
-        const PlayEvent* e = ev[j];
-        if (e->isNoteOn() && e->sister &&
-            static_cast<int64_t>(e->sister->absMicroSec) > target) {
-            active_.push_back(static_cast<int>(j));
-            noteState_[e->param1] = static_cast<int>(j);
+    {
+        // In-RAM and normal full-pool streaming both have every event mapped.
+        // Note-ons carry their end timestamp directly, so no partner table is
+        // required. A seek may fault cold pool pages; seeking is a deliberate
+        // operation and this trades a little seek latency for much lower
+        // session/parse memory.
+        for (size_t j = 0; j < eventCursor_; j++) {
+            const PlayEvent* e = ev[j];
+            if (e->isNoteOn() && static_cast<int64_t>(e->link) > target) {
+                active_.push_back(static_cast<int>(j));
+                noteState_[e->param1] = static_cast<int>(j);
+            }
         }
+#ifdef APFA_STREAMING
+        if (streamer_.isOpen())
+            streamer_.warmSeek(target,
+                               target + static_cast<int64_t>(3000000.0 * noteSpeed_),
+                               active_);
+#endif
     }
 
     synth_.allNotesOff();
@@ -943,7 +964,8 @@ void Engine::applySeek(int64_t target) {
     size_t oldPcCursor = pcCursor_;
     advancePcCursor();
     playSkippedEvents(oldPcCursor);
-    
+    synth_.flush();
+
     pubTimeUs_.store(static_cast<int64_t>(clockUs_));
     LOGI("seek -> %.1f s, %zu active", target * 1e-6, active_.size());
 }
@@ -957,6 +979,7 @@ int64_t Engine::eventUsAt(size_t pos) const {
 #endif
     return midi_.events[pos]->absMicroSec;
 }
+
 
 void Engine::advancePcCursor() {
     const std::vector<size_t>& pcIdx = midi_.programChangeIdx;

@@ -1,4 +1,4 @@
-package com.apfa
+package com.apfaviz
 
 import android.app.Activity
 import android.app.AlertDialog
@@ -25,7 +25,6 @@ import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ProgressBar
-import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
 import com.example.liquidglass.GlassMaterial
@@ -59,6 +58,7 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
         const val EXTRA_BG_COLOR = "bgColor"
         const val EXTRA_BG_IMAGE = "bgImage"
         const val EXTRA_LEGACY   = "legacyRenderer"   // ES2 "Legacy Renderer (GLES 2.0)"
+        const val EXTRA_LIQUID_GLASS = "liquidGlass"
         const val EXTRA_STREAM   = "diskStreaming"    // allow the chunked pagefile sort
                                                       // (key name kept for settings compat)
         const val EXTRA_SD_POOL  = "sdPagefile"       // put the pagefile on the SD card
@@ -96,6 +96,7 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
     // unavailable and the in-RAM parse was already predicted not to fit.
     private external fun nativeGetLoadError(): Int
     private external fun nativeGetLoadProgress(): Float
+    private external fun nativeGetProcessMemoryBytes(): Long
     private external fun nativeGetNoteCount(): Long
     private external fun nativeGetMemoryBytes(): Long
     private external fun nativeGetStreamedBytes(): Long
@@ -122,6 +123,7 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
     private val ui = Handler(Looper.getMainLooper())
 
     private lateinit var loadingText: TextView
+    private lateinit var loadingMemoryText: TextView
     private lateinit var loadingOverlay: TextView
 
     @Volatile private var copying = true
@@ -130,10 +132,12 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
     private var paused      = false
     private var userSeeking = false
     private lateinit var pauseButton: Button
-    private lateinit var seekBar: SeekBar
+    private lateinit var seekBar: GlassPlaybackSeekBar
     private var uiHidden     = false
     private var holdFired    = false
     private var lastStatsUpdateMs = 0L
+    private var liquidGlassEnabled = true
+    private var loadPeakMemoryBytes = 0L
 
     private lateinit var transportBar: View
     private lateinit var statsPanel: TextView
@@ -159,6 +163,7 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
         val bgColor    = intent.getIntExtra(EXTRA_BG_COLOR, 0x00464646)
         val bgImage    = intent.getStringExtra(EXTRA_BG_IMAGE)
         val legacy     = intent.getBooleanExtra(EXTRA_LEGACY, false)
+        liquidGlassEnabled = intent.getBooleanExtra(EXTRA_LIQUID_GLASS, true)
         val chunked    = intent.getBooleanExtra(EXTRA_STREAM, false)
         val sdPagefile = intent.getBooleanExtra(EXTRA_SD_POOL, false)
 
@@ -195,7 +200,7 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
                 if (sd != null) {
                     poolDir = sd.absolutePath
                 } else {
-                    Log.w("aPFA", "SD pagefile requested but unavailable: $why")
+                    Log.w("aPFAViz", "SD pagefile requested but unavailable: $why")
                     ui.post {
                         Toast.makeText(this,
                             "Using internal storage for the pagefile — " +
@@ -204,6 +209,10 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
                     }
                 }
             }
+            // Reset the peak at the exact start of native parsing so the
+            // "Peak" number describes MIDI load/parse memory, not a preceding
+            // cache/SFZ copy spike.
+            loadPeakMemoryBytes = nativeGetProcessMemoryBytes().coerceAtLeast(0L)
             val ok = nativeLoad(midiPath, sfPath, voiceCount, noteSpeed, cpuMask, legacy,
                                 chunked, poolDir)
             // Decode + upload the background image off the UI thread (it can be big).
@@ -221,7 +230,10 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
                             .format(nativeGetNoteCount(), mb, streamedMb)
                     else
                         "%,d notes  -  %.1f MB".format(nativeGetNoteCount(), mb)
-                    Log.i("aPFA", infoLine)
+                    if (loadPeakMemoryBytes > 0L) {
+                        infoLine += "  -  load peak " + formatMemory(loadPeakMemoryBytes)
+                    }
+                    Log.i("aPFAViz", infoLine)
                     showReadyScreen(
                         midiName = midiName,
                         midiBytes = midiBytes,
@@ -271,7 +283,7 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
             setPadding(dp(30), dp(28), dp(30), dp(28))
         }
         card.addView(TextView(this).apply {
-            text = "aPFA"
+            text = "aPFAViz"
             setTextColor(Color.WHITE)
             textSize = 31f
             typeface = Typeface.DEFAULT_BOLD
@@ -303,6 +315,19 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
         }
         card.addView(loadingText)
 
+        loadPeakMemoryBytes = nativeGetProcessMemoryBytes().coerceAtLeast(0L)
+        loadingMemoryText = TextView(this).apply {
+            setTextColor(Color.rgb(45, 212, 191))
+            textSize = 12f
+            gravity = Gravity.CENTER
+            typeface = Typeface.MONOSPACE
+            text = "Process RAM  --"
+        }
+        card.addView(loadingMemoryText, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = dp(7) })
+
         val glass = liquidSurface(
             content = card,
             backdrop = backdrop,
@@ -323,10 +348,34 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
     private val loadingPoll = object : Runnable {
         override fun run() {
             if (stopped) return
-            loadingText.text = if (copying) "Copying file..."
-                else "Loading MIDI...  %d%%".format((nativeGetLoadProgress() * 100).toInt())
+            val rss = nativeGetProcessMemoryBytes().coerceAtLeast(0L)
+            if (rss > loadPeakMemoryBytes) loadPeakMemoryBytes = rss
+
+            loadingText.text = if (copying) {
+                "Copying file..."
+            } else {
+                "Loading MIDI...  %d%%".format(
+                    (nativeGetLoadProgress().coerceIn(0f, 1f) * 100).toInt()
+                )
+            }
+
+            if (::loadingMemoryText.isInitialized) {
+                loadingMemoryText.text = if (rss > 0L) {
+                    "RAM  %s   •   Peak  %s".format(
+                        formatMemory(rss), formatMemory(loadPeakMemoryBytes)
+                    )
+                } else {
+                    "RAM  unavailable"
+                }
+            }
             ui.postDelayed(this, 120)
         }
+    }
+
+    private fun formatMemory(bytes: Long): String {
+        val mb = bytes / 1048576.0
+        return if (mb < 1024.0) "%.1f MB".format(mb)
+               else "%.2f GB".format(mb / 1024.0)
     }
 
     // A load that cannot proceed has something to SAY — which storage ran out,
@@ -379,7 +428,7 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
         }
         val titleBlock = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         titleBlock.addView(TextView(this).apply {
-            text = "aPFA"
+            text = "aPFAViz"
             setTextColor(Color.WHITE)
             textSize = 27f
             typeface = Typeface.DEFAULT_BOLD
@@ -471,8 +520,8 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
             ViewGroup.LayoutParams.WRAP_CONTENT
         ).apply { topMargin = dp(6) })
 
-        val fileGlass = liquidSurface(
-            fileCard, backdrop, Color.rgb(24, 27, 43), 0.25f, 24, false
+        val fileGlass = matteSurface(
+            fileCard, Color.rgb(20, 23, 35), 24
         )
         page.addView(fileGlass, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -510,8 +559,8 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
             maxLines = 1
             ellipsize = android.text.TextUtils.TruncateAt.END
         }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        val sfGlass = liquidSurface(
-            sfChipContent, backdrop, Color.rgb(16, 36, 38), 0.22f, 19, false
+        val sfGlass = matteSurface(
+            sfChipContent, Color.rgb(14, 31, 33), 19
         )
         page.addView(sfGlass)
 
@@ -538,8 +587,8 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
         ).apply { topMargin = dp(11); bottomMargin = dp(11) })
         quick.addView(readyMetricRow("Note Speed", "%.3f×".format(noteSpeed)))
 
-        val quickGlass = liquidSurface(
-            quick, backdrop, Color.rgb(22, 25, 40), 0.22f, 22, false
+        val quickGlass = matteSurface(
+            quick, Color.rgb(19, 22, 34), 22
         )
         page.addView(quickGlass)
 
@@ -555,11 +604,8 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
             textSize = 17f
             typeface = Typeface.DEFAULT_BOLD
         }
-        val playGlass = liquidSurface(
-            playContent, backdrop, Color.rgb(139, 92, 246), 0.46f, 22, true
-        ).apply {
+        val playGlass = solidPrimarySurface(playContent).apply {
             setOnClickListener { showPlaybackScreen() }
-            elevation = dp(12).toFloat()
         }
         root.addView(playGlass, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, dp(62)
@@ -623,8 +669,8 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
             })
         }
 
-        glow(Color.argb(125, 139, 92, 246), 260, Gravity.TOP or Gravity.END, dp(-50), dp(-45))
-        glow(Color.argb(105, 45, 212, 191), 230, Gravity.BOTTOM or Gravity.START, dp(-55), dp(10))
+        glow(Color.argb(165, 139, 92, 246), 290, Gravity.TOP or Gravity.END, dp(-60), dp(-50))
+        glow(Color.argb(142, 45, 212, 191), 255, Gravity.BOTTOM or Gravity.START, dp(-60), dp(12))
         stage.addView(View(this).apply {
             background = GradientDrawable(
                 GradientDrawable.Orientation.TOP_BOTTOM,
@@ -637,6 +683,47 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
         return stage
     }
 
+    private fun matteSurface(
+        content: View,
+        color: Int,
+        cornerDp: Int
+    ): View =
+        FrameLayout(this).apply {
+            elevation = dp(3).toFloat()
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(cornerDp).toFloat()
+                setColor(color)
+                setStroke(dp(1), Color.argb(58, 255, 255, 255))
+            }
+            addView(content, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ))
+        }
+
+    private fun solidPrimarySurface(content: View): View {
+        val shape = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = dp(22).toFloat()
+            setColor(Color.rgb(126, 76, 235))
+        }
+        return FrameLayout(this).apply {
+            background = RippleDrawable(
+                ColorStateList.valueOf(Color.argb(58, 255, 255, 255)),
+                shape,
+                null
+            )
+            elevation = dp(10).toFloat()
+            isClickable = true
+            isFocusable = true
+            addView(content, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            ))
+        }
+    }
+
     private fun liquidSurface(
         content: View,
         backdrop: View,
@@ -644,33 +731,57 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
         strength: Float,
         cornerDp: Int,
         interactive: Boolean
-    ): LiquidGlassView =
-        LiquidGlassView(this).apply {
+    ): View {
+        if (!liquidGlassEnabled) {
+            return FrameLayout(this).apply {
+                val alpha = if (interactive) 255 else 235
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.RECTANGLE
+                    cornerRadius = dp(cornerDp).toFloat()
+                    setColor(Color.argb(
+                        alpha, Color.red(tint), Color.green(tint), Color.blue(tint)
+                    ))
+                    setStroke(
+                        dp(1),
+                        if (interactive) Color.argb(155, 255, 255, 255)
+                        else Color.argb(72, 255, 255, 255)
+                    )
+                }
+                addView(content, FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    if (interactive) ViewGroup.LayoutParams.MATCH_PARENT
+                    else ViewGroup.LayoutParams.WRAP_CONTENT
+                ))
+            }
+        }
+
+        return LiquidGlassView(this).apply {
             cornerRadius = dp(cornerDp).toFloat()
             material = GlassMaterial.REGULAR
-            blurAmount = 0.13f
-            saturation = 126f
-            refractionHeight = dp(if (interactive) 29 else 23).toFloat()
-            bevelWidth = dp(if (interactive) 20 else 18).toFloat()
-            refractionFalloff = 2.65f
-            dispersionStrength = if (interactive) 0.14f else 0.085f
+            blurAmount = 0.29f
+            saturation = 146f
+            refractionHeight = dp(18).toFloat()
+            bevelWidth = dp(12).toFloat()
+            refractionFalloff = 3.15f
+            dispersionStrength = 0.04f
             enableSensorHighlight = false
             enableAdaptiveTint = false
             enableDynamicBackground = false
-            // LiquidGlass' elasticity stretches the axis toward the held/dragged
-            // point, then springs back. Passive cards get a subtle amount; the
-            // primary Play control gets the more obvious liquid response.
-            enablePressEffect = true
-            pressScale = if (interactive) 0.99f else 0.997f
-            elasticity = if (interactive) 0.58f else 0.24f
+            enablePressEffect = interactive
+            pressScale = if (interactive) 0.985f else 1.0f
+            elasticity = if (interactive) 0.16f else 0.0f
             collectFrameStats = false
             backdropSource = backdrop
-            setGlassTint(tint, strength)
+            // Neutral, low-alpha tint reads as glass instead of gray plastic.
+            setGlassTint(Color.WHITE, 0.085f)
+            elevation = dp(12).toFloat()
             addView(content, FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT
+                if (interactive) ViewGroup.LayoutParams.MATCH_PARENT
+                else ViewGroup.LayoutParams.WRAP_CONTENT
             ))
         }
+    }
 
     private fun animateGlassIn(view: View, delayMs: Long) {
         view.alpha = 0f
@@ -758,7 +869,7 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
             gravity = Gravity.CENTER_VERTICAL
         }
         brand.addView(TextView(this).apply {
-            text = "aPFA"
+            text = "aPFAViz"
             setTextColor(Color.WHITE)
             textSize = 17f
             typeface = Typeface.DEFAULT_BOLD
@@ -775,29 +886,23 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
             ViewGroup.LayoutParams.WRAP_CONTENT
         ).apply { marginEnd = dp(12) })
 
-        seekBar = SeekBar(this).apply {
+        seekBar = GlassPlaybackSeekBar(this).apply {
             max = 1000
-            progressTintList = ColorStateList.valueOf(Color.rgb(45, 212, 191))
-            thumbTintList = ColorStateList.valueOf(Color.rgb(139, 92, 246))
-            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {}
-                override fun onStartTrackingTouch(s: SeekBar?) {
-                    userSeeking = true
-                    showTransportAndSchedule()
-                }
-                override fun onStopTrackingTouch(s: SeekBar?) {
-                    val minU = nativeGetMinMicros()
-                    val maxU = nativeGetMaxMicros()
-                    if (maxU > minU)
-                        nativeSeek(minU + (maxU - minU) *
-                            (s?.progress ?: 0).toLong() / 1000L)
-                    userSeeking = false
-                    showTransportAndSchedule()
-                }
-            })
+            onStartTracking = {
+                userSeeking = true
+                showTransportAndSchedule()
+            }
+            onStopTracking = { p ->
+                val minU = nativeGetMinMicros()
+                val maxU = nativeGetMaxMicros()
+                if (maxU > minU)
+                    nativeSeek(minU + (maxU - minU) * p.toLong() / 1000L)
+                userSeeking = false
+                showTransportAndSchedule()
+            }
         }
         bar.addView(seekBar, LinearLayout.LayoutParams(
-            0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f
+            0, dp(48), 1f
         ))
 
         pauseButton = Button(this).apply {
@@ -889,7 +994,7 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
                 } else {
                     // Engine aborted during start-up (synth or GL init). Show why
                     // instead of an infinite "Starting…" and stop polling — the
-                    // user can back out. Full driver error is in logcat (tag aPFA).
+                    // user can back out. Full driver error is in logcat (tag aPFAViz).
                     val err = nativeGetStartError()
                     if (err != 0) {
                         loadingOverlay.text = when (err) {
@@ -898,7 +1003,7 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
                             2 -> "Graphics failed to initialize.\n\n" +
                                  "If this is an older (OpenGL ES 2.0) device, enable " +
                                  "\"Legacy Renderer (GLES 2.0)\" in Settings and try " +
-                                 "again. See logcat (tag aPFA) for details."
+                                 "again. See logcat (tag aPFAViz) for details."
                             else -> "Playback failed to start."
                         }
                         return
@@ -1109,7 +1214,7 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
             bmp.recycle()
             nativeSetBgImage(pixels, w, h)
         } catch (e: Exception) {
-            Log.e("aPFA", "applyBgImage failed", e)
+            Log.e("aPFAViz", "applyBgImage failed", e)
         }
     }
 
@@ -1139,7 +1244,7 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
 
         val local = resolveLocalPath(uri)
         if (local != null && File(local).canRead()) {
-            Log.i("aPFA", "soundfont: playing in place, $local")
+            Log.i("aPFAViz", "soundfont: playing in place, $local")
             return local
         }
         if (!isSfz) return copyToCache(uriStr, name) ?: ""
@@ -1201,7 +1306,7 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
         val dir = File(cacheDir, "sfz")
         wipe(dir)
         if (!dir.mkdirs() && !dir.isDirectory) {
-            Log.e("aPFA", "sfz: could not create $dir")
+            Log.e("aPFAViz", "sfz: could not create $dir")
             return null
         }
         val localRoot = resolveLocalPath(uri)
@@ -1226,15 +1331,15 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
             if (files >= SFZ_MAX_FILES || bytes >= SFZ_MAX_BYTES) { capped = true; break }
             val out = File(dir, rel)
             if (!withinBundle(dir, out)) {
-                Log.w("aPFA", "sfz: refusing path outside the bundle: $rel")
+                Log.w("aPFAViz", "sfz: refusing path outside the bundle: $rel")
                 continue
             }
             out.parentFile?.mkdirs()
             val n = fetchInto(uri, localRoot, rootName, rel, out)
             if (n < 0) {
-                if (rel == rootName) { Log.e("aPFA", "sfz: cannot read $rel"); return null }
+                if (rel == rootName) { Log.e("aPFAViz", "sfz: cannot read $rel"); return null }
                 missing++
-                Log.w("aPFA", "sfz: could not fetch $rel")
+                Log.w("aPFAViz", "sfz: could not fetch $rel")
                 continue
             }
             files++
@@ -1244,7 +1349,7 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
                 val refs = try {
                     sfzReferences(out.readText())
                 } catch (e: Exception) {
-                    Log.w("aPFA", "sfz: unreadable text in $rel", e)
+                    Log.w("aPFAViz", "sfz: unreadable text in $rel", e)
                     emptyList<String>()
                 }
                 for (r in refs) if (seen.add(r)) queue.add(r)
@@ -1252,11 +1357,11 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
         }
         if (!rootOk) return null
 
-        Log.i("aPFA", "sfz: bundled $files file(s), %.1f MB, $missing missing%s"
+        Log.i("aPFAViz", "sfz: bundled $files file(s), %.1f MB, $missing missing%s"
             .format(bytes / 1048576.0, if (capped) " (capped)" else ""))
         if (missing > 0 || capped) {
             val why = if (capped)
-                "This SFZ is larger than aPFA will copy ($files files)."
+                "This SFZ is larger than aPFAViz will copy ($files files)."
             else
                 "$missing sample file(s) of this SFZ could not be read."
             ui.post {
@@ -1277,7 +1382,7 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
             try {
                 contentResolver.openInputStream(base)?.use { return writeTo(it, out) }
             } catch (e: Exception) {
-                Log.w("aPFA", "sfz: root open failed", e)
+                Log.w("aPFAViz", "sfz: root open failed", e)
             }
         } else {
             // A SAF grant is per-document, but ExternalStorageProvider will
@@ -1298,7 +1403,7 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
                 if (f.canRead()) try {
                     FileInputStream(f).use { return writeTo(it, out) }
                 } catch (e: Exception) {
-                    Log.w("aPFA", "sfz: path read failed for $rel", e)
+                    Log.w("aPFAViz", "sfz: path read failed for $rel", e)
                 }
             }
         }
@@ -1432,7 +1537,7 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
         }
         out.absolutePath
     } catch (e: Exception) {
-        Log.e("aPFA", "copyToCache failed: $name", e)
+        Log.e("aPFAViz", "copyToCache failed: $name", e)
         null
     }
 }

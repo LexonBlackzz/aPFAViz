@@ -1,15 +1,15 @@
-// synth.h — BASS + BASSMIDI wrapper, immediate raw call path.
+// synth.h — BASS + BASSMIDI wrapper, bounded raw-MIDI batch path.
 //
-// noteOn/noteOff call BASS_MIDI_StreamEvents(BASS_MIDI_EVENTS_RAW) immediately
-// on the engine thread, one event per call, using raw 3-byte MIDI messages.
-// Raw format avoids the struct decode overhead — same bytes OmniMIDI feeds
-// BASSMIDI via SendDirectData. Timing is identical to the previous direct path.
+// noteOn/noteOff preserve each MIDI message in order in an engine-thread buffer.
+// The existing frame flush submits those bytes to BASSMIDI in <=64 KiB chunks,
+// avoiding one library/API call per Black-MIDI event while retaining every event.
 #pragma once
 
 #include <atomic>
 #include <cstdint>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "bassmidi.h"
 
@@ -30,7 +30,7 @@ public:
 
     void noteOn(int channel, int key, int velocity);
     void noteOff(int channel, int key);
-    void flush();   // no-op, kept for call-site compat
+    void flush();   // submits queued raw MIDI bytes in-order
 
     void sampleEventCost(uint64_t& calls, uint64_t& micros, uint64_t& bpMicros);
     // Voices actually sounding right now vs the ceiling the guard may lower to.
@@ -82,8 +82,13 @@ private:
     int  sampleRate_ = 48000;
     bool ready_      = false;
 
-    std::atomic<uint64_t> evCalls_{0};
-    std::atomic<uint64_t> evMicros_{0};
+    // Engine-thread-only raw MIDI batching. Every message is preserved in
+    // order, but BASS sees bounded chunks instead of one API call per event.
+    static constexpr size_t kRawBatchBytes = 64 * 1024;
+    std::vector<uint8_t> rawBatch_;
+    uint64_t evCalls_ = 0;        // MIDI messages queued
+    uint64_t bassCalls_ = 0;      // actual BASS_MIDI_StreamEvents calls
+    uint64_t evMicros_ = 0;       // wall time spent submitting batches
 };
 
 }  // namespace apfa

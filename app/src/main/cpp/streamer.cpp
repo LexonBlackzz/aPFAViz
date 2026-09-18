@@ -12,7 +12,7 @@
 //                    note-on already left the buffer become fixups.
 //   Pass C (patch) — applies the fixups to the pool file in sorted chunks.
 //   Pass D (sort)  — builds the time-sorted events[] exactly like
-//                    midi_parser.cpp's stable_sort (same keys, same tie-break
+//                    midi_parser.cpp's deterministic sort (same keys, same tie-break
 //                    = pool order), plus programChangeIdx, sisterPos, and the
 //                    sampled time indexes the loader navigates by.
 //
@@ -50,7 +50,7 @@ namespace {
 constexpr size_t kPageSize   = 4096;
 constexpr size_t kBufEvents  = 131072;   // pass-B write buffer (~9 MB)
 constexpr size_t kEventSize  = sizeof(PlayEvent);
-constexpr size_t kRunEntries = 2097152;  // sort-run spill threshold (32 MB)
+constexpr size_t kRunEntries = 2097152;  // sort-run spill threshold (~24 MB)
 constexpr size_t kPairBufEntries = 1048576;  // pair spill threshold (8 MB)
 constexpr size_t kMergeBudget = 64 << 20;    // total merge read-buffer RAM
 
@@ -321,15 +321,25 @@ struct SkimSink {
 
 // Fixup: a note-on that had already left the write buffer when its note-off
 // was emitted; its sister pointer is patched into the file by pass C.
-struct Fixup { uint32_t onIdx, offIdx; };
+struct Fixup { uint32_t onIdx, endUs; };
 struct Pair  { uint32_t onIdx, offIdx; };
-struct SortKey { uint64_t key; uint32_t idx; };
 
-// (µs, track, chType) packed key; idx tie-break = parse order. ONE comparator
-// shared by the chunked run sort and the un-chunked whole-table sort so the
-// total event order can never diverge between the two modes.
+// 12-byte time-order record. The previous uint64 packed key + uint32 index
+// padded to 16 bytes, costing 64 MB unnecessarily at 16M events.
+struct SortKey {
+    uint32_t timeUs;
+    uint32_t idx;
+    uint16_t track;
+    uint8_t  typeRank;   // 14 - channelEventType; lower rank sorts first
+    uint8_t  reserved;
+};
+static_assert(sizeof(SortKey) == 12, "SortKey must stay 12 bytes");
+
+// Same total order as the player: time, track, event-type rank, parse order.
 inline bool sortKeyLess(const SortKey& a, const SortKey& b) {
-    if (a.key != b.key) return a.key < b.key;
+    if (a.timeUs != b.timeUs) return a.timeUs < b.timeUs;
+    if (a.track != b.track) return a.track < b.track;
+    if (a.typeRank != b.typeRank) return a.typeRank < b.typeRank;
     return a.idx < b.idx;
 }
 
@@ -457,32 +467,17 @@ struct EmitSink {
     // configured by open()
     const std::vector<int>* fds = nullptr;   // the pool chain (see poolFileBytes())
     uint64_t written = 0;                    // byte cursor across the whole chain
-    const std::vector<PoolSeg>* poolSegs = nullptr;
     const std::vector<TempoSeg>* segs = nullptr;
     int      ticksPerQuarter = 480;
     size_t   trackSampleStep = 4096;
 
-    // Sliced loads never map the pool, so there is no address to bake into
-    // `sister`: store the partner's POOL INDEX + 1 (0 = none) in the same field
-    // instead and let the slice materialiser turn it into an arena address.
-    // Same struct, same 56 bytes, same passes.
-    bool     encodeIdx = false;
-    PlayEvent* sisterAt(size_t poolIdx) const {
-        if (encodeIdx)
-            return reinterpret_cast<PlayEvent*>(static_cast<uintptr_t>(poolIdx) + 1);
-        return reinterpret_cast<PlayEvent*>(poolAddrIn(*poolSegs, poolIdx * kEventSize));
-    }
-    // sister = &pool[0]: midi_parser.cpp's final index->pointer pass turns the
-    // parse-time nullptr (index 0) into a pointer at the pool base for every
-    // non-note event. Reproduce the artifact exactly; sliced loads encode it as
-    // 0 and the materialiser resolves it to the arena base.
-    PlayEvent* sisterNone() const {
-        if (encodeIdx) return nullptr;
-        return reinterpret_cast<PlayEvent*>(poolAddrIn(*poolSegs, 0));
-    }
+    // Pool note-ons store their final absolute end time in PlayEvent::link.
+    // Pair records separately build Streamer's resident partner-position table
+    // for slicing/seek bookkeeping.
+    bool     encodeIdx = false;  // sliced-mode switch for resident seek payloads
 
     // outputs
-    std::vector<Fixup>   fixups;         // cross-buffer sister patches (RAM; rare)
+    std::vector<Fixup>   fixups;         // cross-buffer end-time patches (RAM; rare)
     std::vector<PcRaw>   pcRaw;          // sliced loads only (see PcRaw)
     std::vector<int64_t>  sampleUs;      // flattened per-track (µs, poolIdx) samples
     std::vector<uint32_t> sampleIdx;
@@ -500,10 +495,10 @@ struct EmitSink {
         if (errno == EFBIG) fileTooBig = true;
     }
 
-    // Sort keys. chunked=false (the automatic path): runBuf holds EVERY key
-    // until pass D — 16 B/event resident, the load transient that caps
-    // un-chunked streaming at ~80 M notes on an 8 GB phone (it's what lmkd
-    // killed at 78% on NoK 90M). chunked=true ("Chunked Disk Streaming"):
+    // Sort keys. chunked=false: runBuf holds EVERY 12-byte key until pass D.
+    // Larger loads are automatically switched to the bounded disk-backed path;
+    // the Advanced Settings switch can force that path for smaller loads too.
+    // chunked=true:
     // keys spill to disk in pre-sorted 32 MB runs and a k-way merge in pass D
     // consumes them — no transient, storage-bound only.
     bool     chunked = false;
@@ -583,12 +578,16 @@ struct EmitSink {
         if (us > 0xFFFFFFFFull) us = 0xFFFFFFFFull;   // parser's per-event cap
         if (us > totalUs) totalUs = us;
         PlayEvent out = e;
-        out.absMicroSec = static_cast<int64_t>(us);
+        out.absMicroSec = static_cast<uint32_t>(us);
         buf.push_back(out);
         if (buf.size() >= kBufEvents) flush();
-        runBuf.push_back({ (us << 19) |
-                           (static_cast<uint64_t>(track) << 3) |
-                           static_cast<uint64_t>(14 - chType), idx });
+        runBuf.push_back({
+            static_cast<uint32_t>(us),
+            idx,
+            static_cast<uint16_t>(track),
+            static_cast<uint8_t>(14 - chType),
+            0
+        });
         if (chunked && runBuf.size() >= kRunEntries) spillRun();
         if (inTrackCount % trackSampleStep == 0) {
             sampleUs.push_back(static_cast<int64_t>(us));
@@ -600,39 +599,46 @@ struct EmitSink {
 
     uint32_t noteOn(int t, uint32_t tick, int ch, int key, int vel) {
         int c = ch & 0x0F;
-        PlayEvent e{ 0, 0x90 | c, t, 0, static_cast<int32_t>(tick),
-                     0 /*µs set in emit*/, kNoteOn, 0,
-                     static_cast<uint8_t>(c), static_cast<uint8_t>(key & 0x7F),
-                     static_cast<uint8_t>(vel & 0x7F),
-                     sisterNone() /*patched by noteOff*/,
-                     0, nullptr };
+        PlayEvent e{
+            0, kNoEventLink, static_cast<uint16_t>(t),
+            static_cast<uint8_t>(0x90 | c), static_cast<uint8_t>(key & 0x7F),
+            static_cast<uint8_t>(vel & 0x7F), static_cast<uint8_t>(c),
+            static_cast<uint8_t>(kNoteOn), 0
+        };
         return emit(e, t, tick, kNoteOn);
     }
 
     void noteOff(int t, uint32_t tick, int ch, int key, uint32_t onIdx) {
         int c = ch & 0x0F;
-        PlayEvent e{ 0, 0x80 | c, t, 0, static_cast<int32_t>(tick),
-                     0, kNoteOff, 0,
-                     static_cast<uint8_t>(c), static_cast<uint8_t>(key & 0x7F), 0,
-                     sisterAt(onIdx),
-                     0, nullptr };
+        PlayEvent e{
+            0, kNoEventLink, static_cast<uint16_t>(t),
+            static_cast<uint8_t>(0x80 | c), static_cast<uint8_t>(key & 0x7F), 0,
+            static_cast<uint8_t>(c), static_cast<uint8_t>(kNoteOff), 0
+        };
         uint32_t offIdx = emit(e, t, tick, kNoteOff);
-        pairBuf.push_back({ onIdx, offIdx });
-        if (chunked && pairBuf.size() >= kPairBufEntries) spillPairs();
-        PlayEvent* sisterPtr = sisterAt(offIdx);
+        if (encodeIdx) {
+            pairBuf.push_back({ onIdx, offIdx });
+            if (chunked && pairBuf.size() >= kPairBufEntries) spillPairs();
+        }
+
+        uint64_t us64 = tickToUs(tick);
+        if (us64 > 0xFFFFFFFFull) us64 = 0xFFFFFFFFull;
+        const uint32_t endUs = static_cast<uint32_t>(us64);
         if (onIdx >= bufStart) {
-            buf[onIdx - bufStart].sister = sisterPtr;
+            buf[onIdx - bufStart].link = endUs;
         } else {
-            fixups.push_back({ onIdx, offIdx });
+            fixups.push_back({ onIdx, endUs });
         }
     }
 
     void channelEvent(int t, uint32_t tick, uint8_t status, uint8_t p1, uint8_t p2) {
         int c    = status & 0x0F;
         int type = status >> 4;
-        PlayEvent e{ 0, status, t, 0, static_cast<int32_t>(tick),
-                     0, type, 0,
-                     static_cast<uint8_t>(c), p1, p2, sisterNone(), 0, nullptr };
+        PlayEvent e{
+            0, kNoEventLink, static_cast<uint16_t>(t),
+            status, p1, p2, static_cast<uint8_t>(c),
+            static_cast<uint8_t>(type), 0
+        };
         uint32_t idx = emit(e, t, tick, type);
         // The three types Engine::playSkippedEvents replays on a seek. Only the
         // sliced path needs them resident (see PcRaw); encodeIdx is exactly that
@@ -799,9 +805,9 @@ std::vector<SlicePlan> planSlices(const std::vector<uint32_t>& sisterPos,
         // we would have to copy in as well.
         uint32_t s = sisterPos[pos];
         uint32_t soundingAfter = sounding;
-        if (s == Streamer::kSisNoteOff) {
+        if (Streamer::linkIsNoteOff(s)) {
             if (soundingAfter > 0) soundingAfter--;
-        } else if (s != Streamer::kSisNonNote) {
+        } else if (Streamer::linkIsNoteOn(s)) {
             soundingAfter++;
         }
         uint64_t costIfTaken = static_cast<uint64_t>(cur.carryIn)
@@ -936,7 +942,7 @@ bool Streamer::open(const std::string& midiPath, MidiData& out,
 
     size_t totalEvents = 0;
     for (size_t c : skim.trackCounts) totalEvents += c;
-    if (totalEvents == 0 || totalEvents >= kSisNoteOff ||
+    if (totalEvents == 0 || totalEvents >= kLinkNoteOffFlag ||
         totalEvents > (SIZE_MAX / kEventSize) - kPageSize) {
         munmap(midiMap, fileSize);
         LOGE("streamer: unusable event count %zu", totalEvents);
@@ -986,11 +992,11 @@ bool Streamer::open(const std::string& midiPath, MidiData& out,
     // every one of them needs a contiguous run of its OWN:
     //
     //   events[]    totalEvents * sizeof(PlayEvent*)  held all session
-    //   sisterPos_  totalEvents * 4                   held all session
-    //   inv[]       totalEvents * 4                   through pass D
+    //   sisterPos_  totalEvents * 4    sliced only    held all session
+    //   inv[]       totalEvents * 4    sliced only    through pass D
     //   poolIdx_    totalEvents * 4    sliced only    held all session
     //   posUs_      totalEvents * 4    sliced only    held all session
-    //   the sort    emit.runBuf, 16 B/event in ONE block when un-chunked;
+    //   the sort    emit.runBuf, 12 B/event in ONE block when un-chunked;
     //               kMergeBudget spread over per-run buffers when chunked
     //
     // Pricing that as a single splittable reservation is what let a load pass
@@ -1012,9 +1018,9 @@ bool Streamer::open(const std::string& midiPath, MidiData& out,
         const size_t tbl = totalEvents * sizeof(uint32_t);
         std::vector<WorkBlock> b;
         b.push_back({ totalEvents * sizeof(PlayEvent*), true });  // events[]
-        b.push_back({ tbl, true });                               // sisterPos_
-        b.push_back({ tbl, true });                               // inv[]
         if (slicedShape) {
+            b.push_back({ tbl, true });                           // sisterPos_
+            b.push_back({ tbl, true });                           // inv[]
             b.push_back({ tbl, true });                           // poolIdx_
             b.push_back({ tbl, true });                           // posUs_
         }
@@ -1226,7 +1232,7 @@ bool Streamer::open(const std::string& midiPath, MidiData& out,
     };
     // Give a named temp's space back the moment its fd closes, instead of at
     // close(). The unlinked path gets this from the kernel for free; without it
-    // the spills — 16 B/event of keys plus 8 B/note of pairs, GBs on the MIDIs
+    // the spills — 12 B/event of keys plus 8 B/note of pairs, GBs on the MIDIs
     // that need the card in the first place — would sit on the card for the
     // whole of playback with nothing holding them open.
     poolDirUsed_   = dir;          // the slice builder creates its temps here
@@ -1263,9 +1269,11 @@ bool Streamer::open(const std::string& midiPath, MidiData& out,
     // single byte is written. Refuse now rather than strand the phone at 0 B
     // free three passes in.
     uint64_t predictedDiskBytes = poolBytes_;
-    if (chunked)
-        predictedDiskBytes += totalEvents * sizeof(SortKey) +
-                              static_cast<uint64_t>(skim.noteCount) * sizeof(Pair);
+    if (chunked) {
+        predictedDiskBytes += totalEvents * sizeof(SortKey);
+        if (sliced)
+            predictedDiskBytes += static_cast<uint64_t>(skim.noteCount) * sizeof(Pair);
+    }
     // A sliced load keeps two materialised slices alongside the pool, each at
     // most one arena's worth. That is the whole extra storage cost of slicing,
     // however long the song is.
@@ -1299,7 +1307,6 @@ bool Streamer::open(const std::string& midiPath, MidiData& out,
     std::string runsPath, pairsPath;   // named only on the SD path (see above)
     EmitSink emit;
     emit.fds  = &poolFds;
-    emit.poolSegs = &segs_;
     emit.segs = &segs;
     emit.ticksPerQuarter = ticksPerQuarter;
     emit.trackSampleStep = kTrackSampleStep;
@@ -1309,10 +1316,12 @@ bool Streamer::open(const std::string& midiPath, MidiData& out,
     emit.sampleTrackOff.push_back(0);
     if (chunked) {
         emit.runBuf.reserve(kRunEntries);
-        emit.pairBuf.reserve(kPairBufEntries);
-        emit.runsFd  = makePoolTemp("runs",  &runsPath);
-        emit.pairsFd = makePoolTemp("pairs", &pairsPath);
-        if (emit.runsFd < 0 || emit.pairsFd < 0) {
+        emit.runsFd = makePoolTemp("runs", &runsPath);
+        if (sliced) {
+            emit.pairBuf.reserve(kPairBufEntries);
+            emit.pairsFd = makePoolTemp("pairs", &pairsPath);
+        }
+        if (emit.runsFd < 0 || (sliced && emit.pairsFd < 0)) {
             LOGE("streamer: spill temp files failed in %s (errno=%d)", dir.c_str(), errno);
             if (emit.runsFd >= 0) ::close(emit.runsFd);
             if (emit.pairsFd >= 0) ::close(emit.pairsFd);
@@ -1322,11 +1331,10 @@ bool Streamer::open(const std::string& midiPath, MidiData& out,
             return false;
         }
     } else {
-        // Un-chunked: hold everything for pass D in RAM up front. This IS the
-        // deliberate ceiling (16 B/event + 8 B/note transient); past it the
-        // engine routes to chunked mode or refuses.
+        // Un-chunked: only the time-order key table is universal. Note-pair
+        // metadata is needed solely by the 32-bit sliced path.
         emit.runBuf.reserve(totalEvents);
-        emit.pairBuf.reserve(skim.noteCount);
+        if (sliced) emit.pairBuf.reserve(skim.noteCount);
     }
 
     int maxTrackB = 0;
@@ -1334,7 +1342,7 @@ bool Streamer::open(const std::string& midiPath, MidiData& out,
     emit.flush();
     if (chunked) {
         emit.spillRun();
-        emit.spillPairs();
+        if (sliced) emit.spillPairs();
     } else {
         // One whole-table sort in place of the run spills — same comparator,
         // so the merged and un-merged orders are byte-identical.
@@ -1384,7 +1392,7 @@ bool Streamer::open(const std::string& midiPath, MidiData& out,
             }
             while (i < emit.fixups.size() && emit.fixups[i].onIdx < c0 + n) {
                 const Fixup& f = emit.fixups[i];
-                chunk[f.onIdx - c0].sister = emit.sisterAt(f.offIdx);
+                chunk[f.onIdx - c0].link = f.endUs;
                 i++;
             }
             if (!poolPwrite(poolFds, chunk.data(), n * kEventSize, off)) {
@@ -1397,7 +1405,7 @@ bool Streamer::open(const std::string& midiPath, MidiData& out,
     }
 
     // ---- pass D: sorted keys -> events[], pcIdx, samples ----
-    // Same total order as midi_parser.cpp's stable_sort: (µs, track,
+    // Same total order as midi_parser.cpp's deterministic sort: (µs, track,
     // channelEventType DESC), ties broken by pool index = parse order.
     // us<<19 | track<<3 | (14-chType) packs all three keys; idx is the tie.
     // Un-chunked: one linear walk over the whole sorted key table (resident
@@ -1419,16 +1427,16 @@ bool Streamer::open(const std::string& midiPath, MidiData& out,
     auto placeEvent = [&](size_t pos, const SortKey& sk) {
         if (sliced) {
             poolIdx_[pos] = sk.idx;
-            posUs_[pos]   = static_cast<uint32_t>(sk.key >> 19);
+            posUs_[pos]   = sk.timeUs;
         } else {
             out.events[pos] = reinterpret_cast<PlayEvent*>(
                 poolAddr(static_cast<size_t>(sk.idx) * kEventSize));
         }
-        int chType = 14 - static_cast<int>(sk.key & 7);
+        int chType = 14 - static_cast<int>(sk.typeRank);
         if (chType == kProgramChange || chType == kController || chType == kPitchBend)
             out.programChangeIdx.push_back(pos);
         if (pos % kPosSampleStep == 0)
-            posTimes_.push_back(static_cast<int64_t>(sk.key >> 19));
+            posTimes_.push_back(static_cast<int64_t>(sk.timeUs));
         if ((pos & 0xFFFFF) == 0)
             progress.store(0.62f + 0.18f * float(pos) / float(totalEvents));
     };
@@ -1467,7 +1475,12 @@ bool Streamer::open(const std::string& midiPath, MidiData& out,
 
         using HeapItem = std::pair<SortKey, uint32_t>;   // (key, run index)
         auto heapGreater = [](const HeapItem& a, const HeapItem& b) {
-            if (a.first.key != b.first.key) return a.first.key > b.first.key;
+            if (a.first.timeUs != b.first.timeUs)
+                return a.first.timeUs > b.first.timeUs;
+            if (a.first.track != b.first.track)
+                return a.first.track > b.first.track;
+            if (a.first.typeRank != b.first.typeRank)
+                return a.first.typeRank > b.first.typeRank;
             return a.first.idx > b.first.idx;
         };
         std::priority_queue<HeapItem, std::vector<HeapItem>, decltype(heapGreater)>
@@ -1499,20 +1512,24 @@ bool Streamer::open(const std::string& midiPath, MidiData& out,
     }
     progress.store(0.80f);
 
-    // ---- sisterPos: inverse map (transient) + pairs (resident or streamed) ----
-    {
+    // ---- sliced-only partner positions --------------------------------------
+    // Full-pool streaming can dereference PlayEvent::link directly, so it no
+    // longer pays for Pair + inv + sisterPos. Sliced mode cannot map arbitrary
+    // historical events and still needs the compact global partner table.
+    if (sliced) {
         std::vector<uint32_t> inv(totalEvents);
         for (size_t pos = 0; pos < totalEvents; pos++)
-            inv[sliced ? poolIdx_[pos] : poolOffOf(out.events[pos]) / kEventSize] =
-                static_cast<uint32_t>(pos);
-        sisterPos_.assign(totalEvents, kSisNonNote);
+            inv[poolIdx_[pos]] = static_cast<uint32_t>(pos);
+
+        sisterPos_.assign(totalEvents, kLinkNonNote);
         if (!chunked) {
             for (const Pair& pr : emit.pairBuf) {
-                sisterPos_[inv[pr.onIdx]]  = inv[pr.offIdx];
-                sisterPos_[inv[pr.offIdx]] = kSisNoteOff;
+                const uint32_t onPos  = inv[pr.onIdx];
+                const uint32_t offPos = inv[pr.offIdx];
+                sisterPos_[onPos]  = offPos;
+                sisterPos_[offPos] = kLinkNoteOffFlag | onPos;
             }
-            emit.pairBuf.clear();
-            emit.pairBuf.shrink_to_fit();
+            std::vector<Pair>().swap(emit.pairBuf);
         } else {
             std::vector<Pair> chunk(kPairBufEntries);
             uint64_t done = 0;
@@ -1529,8 +1546,10 @@ bool Streamer::open(const std::string& midiPath, MidiData& out,
                     return false;
                 }
                 for (size_t i = 0; i < n; i++) {
-                    sisterPos_[inv[chunk[i].onIdx]]  = inv[chunk[i].offIdx];
-                    sisterPos_[inv[chunk[i].offIdx]] = kSisNoteOff;
+                    const uint32_t onPos  = inv[chunk[i].onIdx];
+                    const uint32_t offPos = inv[chunk[i].offIdx];
+                    sisterPos_[onPos]  = offPos;
+                    sisterPos_[offPos] = kLinkNoteOffFlag | onPos;
                 }
                 done += n;
             }
@@ -1538,7 +1557,7 @@ bool Streamer::open(const std::string& midiPath, MidiData& out,
     }
     if (emit.pairsFd >= 0) {
         ::close(emit.pairsFd); emit.pairsFd = -1;
-        releaseTemp(pairsPath);           // sisterPos is built — same
+        releaseTemp(pairsPath);
     }
     progress.store(0.92f);
 
@@ -1564,7 +1583,7 @@ bool Streamer::open(const std::string& midiPath, MidiData& out,
         // find by walking events[] when nothing is mapped yet.
         firstNoteUs_ = 0;
         for (size_t pos = 0; pos < totalEvents; pos++)
-            if (sisterPos_[pos] < kSisNoteOff) {
+            if (linkIsNoteOn(sisterPos_[pos])) {
                 firstNoteUs_ = static_cast<int64_t>(posUs_[pos]);
                 break;
             }
@@ -1677,7 +1696,7 @@ bool Streamer::open(const std::string& midiPath, MidiData& out,
         // that comes with it, then materialise the first one so playback can
         // start the moment load() returns.
         uint32_t budget = static_cast<uint32_t>(std::min<size_t>(
-            arenaEvents() * kSliceBudgetNum / kSliceBudgetDen, kSisNoteOff - 1));
+            arenaEvents() * kSliceBudgetNum / kSliceBudgetDen, kLinkPosMask));
         plan_ = planSlices(sisterPos_, budget, kSliceMinEvents);
         size_t worst = 0;
         for (const SlicePlan& spn : plan_)
@@ -1911,8 +1930,8 @@ bool Streamer::buildSlice(int sliceIdx, SliceMap& out) {
     size_t sounding = 0;
     for (size_t pos = 0; pos < endPos; pos++) {
         uint32_t s = sisterPos_[pos];
-        if (s == kSisNonNote) continue;
-        if (s == kSisNoteOff) { if (sounding) sounding--; continue; }
+        if (linkIsNonNote(s)) continue;
+        if (linkIsNoteOff(s)) { if (sounding) sounding--; continue; }
         sounding++;
         if (pos < firstPos && static_cast<size_t>(s) >= firstPos)
             carryIn.push_back(static_cast<uint32_t>(pos));
@@ -1933,8 +1952,8 @@ bool Streamer::buildSlice(int sliceIdx, SliceMap& out) {
         if (static_cast<int64_t>(posUs_[matEnd]) > limitUs) break;
         uint32_t s = sisterPos_[matEnd];
         size_t after = sounding;
-        if (s == kSisNoteOff) { if (after) after--; }
-        else if (s != kSisNonNote) after++;
+        if (linkIsNoteOff(s)) { if (after) after--; }
+        else if (linkIsNoteOn(s)) after++;
         if (carryIn.size() + (matEnd + 1 - firstPos) + after > cap) break;
         sounding = after;
         matEnd++;
@@ -1947,8 +1966,8 @@ bool Streamer::buildSlice(int sliceIdx, SliceMap& out) {
     carryOut.reserve(sounding);
     for (size_t pos = 0; pos < matEnd; pos++) {
         uint32_t s = sisterPos_[pos];
-        if (s < kSisNoteOff && static_cast<size_t>(s) >= matEnd)
-            carryOut.push_back(s);
+        if (linkIsNoteOn(s) && static_cast<size_t>(linkPartner(s)) >= matEnd)
+            carryOut.push_back(linkPartner(s));
     }
     std::sort(carryOut.begin(), carryOut.end());
 
@@ -2047,22 +2066,8 @@ bool Streamer::buildSlice(int sliceIdx, SliceMap& out) {
         }
         for (size_t k = i; k <= j; k++) {
             PlayEvent e = rbuf[need[k].poolIdx - base];
-            // Pass B stored the partner's POOL INDEX + 1 in `sister` (0 for a
-            // non-note event, whose sister is PFA's &pool[0] artifact). Resolve
-            // it against the arena: every partner is in this slice by
-            // construction — a note-on's off is in the body or the carry-out, a
-            // note-off's on is in the body or the carry-in.
-            uintptr_t enc = reinterpret_cast<uintptr_t>(e.sister);
-            size_t slot = 0;
-            if (enc != 0) {
-                uint32_t partner = static_cast<uint32_t>(enc - 1);
-                const Need* f = std::lower_bound(
-                    need.data(), need.data() + need.size(), partner,
-                    [](const Need& a, uint32_t v) { return a.poolIdx < v; });
-                if (f != need.data() + need.size() && f->poolIdx == partner)
-                    slot = static_cast<size_t>(f - need.data());
-            }
-            e.sister = reinterpret_cast<PlayEvent*>(arenaBase + slot * kEventSize);
+            // PlayEvent::link is already the note's absolute end time. Slices
+            // copy it verbatim; sisterPos_ remains separate bookkeeping.
 
             // The loader's per-track index, rebuilt against slot numbers. Pool
             // order is track-major, so tracks arrive in ascending order and
@@ -2173,8 +2178,9 @@ void Streamer::installSliceLocked(SliceMap& s, int64_t playheadUs) {
     // over their positions in this slice.
     for (size_t i = 0; i < s.carryPos.size(); i++) {
         if (s.carryPos[i] >= s.firstPos) break;      // carry-out, sorted after
-        uint32_t off = sisterPos_[s.carryPos[i]];
-        if (off >= kSisNoteOff) continue;
+        uint32_t offLink = sisterPos_[s.carryPos[i]];
+        if (!linkIsNoteOn(offLink)) continue;
+        uint32_t off = linkPartner(offLink);
         uintptr_t a = reinterpret_cast<uintptr_t>(
             base + static_cast<size_t>(s.carrySlot[i]) * kEventSize);
         uintptr_t p1 = a & ~(kPageSize - 1);
@@ -2477,45 +2483,42 @@ void Streamer::loaderTickLocked(int64_t t) {
     // U11's average, 3.17 GB at its collapse).
     const int64_t frontUs = budgetedFrontUs(t);
 
-    // Front-edge scan: pre-touch the note-offs of long notes entering the
-    // window, so buildVisible's duration read (e->sister->absMicroSec) never
-    // faults on the engine thread. These stay SYNCHRONOUS — one scattered page
-    // each, and blocking here is how the loader paces itself against storage
-    // instead of racing ahead of it.
-    //
-    // A shorter horizon puts more note-offs past the front edge, so the count
-    // is capped: past the cap the remaining sisters are left to fault on the
-    // engine thread, which is what PFA does with all of them. Better to spend
-    // a bounded slice of the tick here than to let one dense stretch of long
-    // notes starve the bulk advisories below.
+    // buildVisible no longer dereferences paired note-offs: each note-on now
+    // carries its absolute end time directly. Advance the logical front without
+    // the old scattered note-off page-touch scan.
     size_t newFront = std::min(coarsePosOf(t + frontUs) + kPosSampleStep, n);
-    size_t sisterLeft = kMaxSisterTouchPerTick;
-    for (size_t pos = frontPos_; pos < newFront; pos++) {
-        uint32_t s = sisterPos_[pos];
-        if (s < kSisNoteOff && static_cast<size_t>(s) > newFront) {
-            if (sisterLeft == 0) continue;
-            sisterLeft--;
-            const uint8_t* off = reinterpret_cast<const uint8_t*>(ev[s]);
-            touchRange(off, off + kEventSize - 1);
-        }
-    }
     if (newFront > frontPos_) frontPos_ = newFront;
 
     // Back-edge scan: note-ons leaving the window that are STILL sounding
-    // (their off is ahead of the playhead) get pinned — the O(P) note-off
-    // scan and buildVisible keep reading them until the off dispatches.
+    // get pinned until their absolute end timestamp.
     size_t newBack = std::min(coarsePosOf(t - backUs_), n);
     for (size_t pos = backPos_; pos < newBack; pos++) {
-        uint32_t s = sisterPos_[pos];
-        if (s < kSisNoteOff && static_cast<size_t>(s) > curPos) {
-            uintptr_t page = reinterpret_cast<uintptr_t>(ev[pos]) & ~(kPageSize - 1);
-            uintptr_t page2 = (reinterpret_cast<uintptr_t>(ev[pos]) + kEventSize - 1)
+        const PlayEvent* e = ev[pos];
+        uint32_t endUs = 0;
+        bool sounding = false;
+        if (sliced_) {
+            uint32_t link = sisterPos_[pos];
+            if (linkIsNoteOn(link) &&
+                static_cast<size_t>(linkPartner(link)) > curPos) {
+                const uint32_t offPos = linkPartner(link);
+                endUs = offPos < posUs_.size() ? posUs_[offPos]
+                                               : static_cast<uint32_t>(t);
+                sounding = static_cast<int64_t>(endUs) > t;
+            }
+        } else if (e && e->isNoteOn() && static_cast<int64_t>(e->link) > t) {
+            endUs = e->link;
+            sounding = true;
+        }
+
+        if (sounding && e) {
+            uintptr_t page = reinterpret_cast<uintptr_t>(e) & ~(kPageSize - 1);
+            uintptr_t page2 = (reinterpret_cast<uintptr_t>(e) + kEventSize - 1)
                               & ~(kPageSize - 1);
             auto& rel = pinnedPages_[page];
-            if (s > rel) rel = s;
+            if (endUs > rel) rel = endUs;
             if (page2 != page) {
                 auto& rel2 = pinnedPages_[page2];
-                if (s > rel2) rel2 = s;
+                if (endUs > rel2) rel2 = endUs;
             }
         }
     }
@@ -2570,7 +2573,7 @@ void Streamer::loaderTickLocked(int64_t t) {
     // Pins: drop the completed ones, keep the rest warm (a re-touch after our
     // own DONTNEED costs one 4K read; there are few pins).
     for (auto it = pinnedPages_.begin(); it != pinnedPages_.end();) {
-        if (static_cast<size_t>(it->second) <= curPos) {
+        if (static_cast<int64_t>(it->second) <= t) {
             it = pinnedPages_.erase(it);
         } else {
             (void)*const_cast<volatile uint8_t*>(
@@ -2615,41 +2618,24 @@ void Streamer::warmSeek(int64_t targetUs, int64_t visibleEndUs,
         trackHi_[trk] = std::max(trackHi_[trk], ranges[trk].second + 1);
     }
 
-    // Long-note offs inside the visible band (buildVisible reads their times
-    // on the very next frame).
-    size_t p0 = coarsePosOf(targetUs);
-    size_t p1 = std::min(coarsePosOf(visibleEndUs) + kPosSampleStep, totalEvents_);
-    if (sliced_) {
-        if (p0 < cur_.firstPos) p0 = cur_.firstPos;
-        if (p1 > cur_.matEnd)   p1 = cur_.matEnd;
-        if (p0 > p1)            p0 = p1;
-    }
-    for (size_t pos = p0; pos < p1; pos++) {
-        uint32_t s = sisterPos_[pos];
-        if (s < kSisNoteOff && static_cast<size_t>(s) > p1) {
-            const uint8_t* off = reinterpret_cast<const uint8_t*>(ev[s]);
-            touchRange(off, off + kEventSize - 1);
-        }
-    }
-
-    // Still-sounding note-ons resurrected by the seek: touch them (applySeek
-    // reads param1 right after this) and their offs, and pin their pages.
+    // Still-sounding note-ons resurrected by the seek: touch the note-on page
+    // (applySeek reads param1 immediately) and pin it until its note-off position.
+    // The note-off page itself is no longer read by the render hot path.
     for (int posInt : activePositions) {
         size_t pos = static_cast<size_t>(posInt);
         const uint8_t* on = reinterpret_cast<const uint8_t*>(ev[pos]);
         touchRange(on, on + kEventSize - 1);
-        uint32_t s = sisterPos_[pos];
-        if (s < kSisNoteOff) {
-            const uint8_t* off = reinterpret_cast<const uint8_t*>(ev[s]);
-            touchRange(off, off + kEventSize - 1);
+        const PlayEvent* e = ev[pos];
+        if (e && e->isNoteOn()) {
+            const uint32_t endUs = e->link;
             uintptr_t page = reinterpret_cast<uintptr_t>(on) & ~(kPageSize - 1);
             uintptr_t page2 = (reinterpret_cast<uintptr_t>(on) + kEventSize - 1)
                               & ~(kPageSize - 1);
             auto& rel = pinnedPages_[page];
-            if (s > rel) rel = s;
+            if (endUs > rel) rel = endUs;
             if (page2 != page) {
                 auto& rel2 = pinnedPages_[page2];
-                if (s > rel2) rel2 = s;
+                if (endUs > rel2) rel2 = endUs;
             }
         }
     }

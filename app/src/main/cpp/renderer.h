@@ -1,6 +1,6 @@
 // renderer.h — shared renderer interface + per-instance data layouts.
 //
-// aPFA ships two renderer implementations behind the IRenderer interface:
+// aPFAViz ships two renderer implementations behind the IRenderer interface:
 //   • RendererES2 (renderer.cpp / renderer_es2.h) — OpenGL ES 2.0 baseline, GLSL
 //     ES 1.00, runs on ES2-only GPUs (Mali-400 / MT6570 class). This is also the
 //     iOS renderer. The "Legacy Renderer (GLES 2.0)" toggle selects it.
@@ -16,20 +16,17 @@
 
 namespace apfa {
 
-// Per-instance note record the engine produces. 28 bytes — keep this layout
-// (and order) in lockstep with RendererES3's hardcoded note-VAO offsets
-// (renderer_es3.cpp, stride 28). RendererES2 copies this into its own
-// keyX/keyW-augmented NoteInstanceES2 (renderer_es2.h) at draw time, because
-// GLSL ES 1.00 cannot dynamically index a per-key uniform array.
+// Compact visible-note record. White/sharp layering is already split into
+// separate vectors by Engine::buildVisible, and the dark/very-dark shades are
+// fixed 0.6x/0.2x RGB variants of the primary color, so the shaders derive them
+// instead of uploading two redundant colors per note.
 struct NoteInstance {
     float    startSec;
     float    durSec;
     float    key;          // MIDI key 0..127
     uint32_t colorPrimary;
-    uint32_t colorDark;
-    uint32_t colorVeryDark;
-    uint32_t isSharp;
 };
+static_assert(sizeof(NoteInstance) == 16, "NoteInstance must stay 16 bytes");
 
 struct RectInstance {
     float    x, y, w, h;   // normalised [0..1], y=bottom in GL
@@ -80,7 +77,8 @@ public:
 
     virtual void render(float clockSec, float totalSec, float fps,
                         float windowSec,
-                        const std::vector<NoteInstance>& notes,
+                        const std::vector<NoteInstance>& whiteNotes,
+                        const std::vector<NoteInstance>& sharpNotes,
                         const uint32_t keyColor[128]) = 0;
 };
 

@@ -1,4 +1,4 @@
-package com.apfa
+package com.apfaviz
 
 import android.content.Context
 import android.os.Build
@@ -93,7 +93,7 @@ object SdCard {
             if (f.delete()) freed += len
         }
         if (freed > 0)
-            Log.i("aPFA", "swept %.1f MB of stale SD pagefile temps".format(freed / 1048576.0))
+            Log.i("aPFAViz", "swept %.1f MB of stale SD pagefile temps".format(freed / 1048576.0))
     }
 
     // Is the SoC 64-bit? Asked separately from the ROM so a 64-bit phone

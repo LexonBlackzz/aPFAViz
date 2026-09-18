@@ -32,7 +32,8 @@ public:
 
     void render(float clockSec, float totalSec, float fps,
                 float windowSec,
-                const std::vector<NoteInstance>& notes,
+                const std::vector<NoteInstance>& whiteNotes,
+                const std::vector<NoteInstance>& sharpNotes,
                 const uint32_t keyColor[128]) override;
 
 private:
@@ -87,6 +88,12 @@ private:
     GLuint textProg_ = 0;
     GLuint bgProg_   = 0;   // stretched background-image quad
 
+    // Cached uniform locations. glGetUniformLocation() is link-time metadata,
+    // not per-frame work.
+    GLint noteUClock_ = -1, noteUWindow_ = -1, noteUKbFrac_ = -1;
+    GLint noteUViewport_ = -1, noteUKey_ = -1, noteUWhiteKey_ = -1;
+    GLint bgUYBottom_ = -1, bgUTex_ = -1;
+
     // VAOs / VBOs
     GLuint noteVao_  = 0, instVbo_     = 0;
     GLuint rectVao_  = 0, rectInstVbo_ = 0;
@@ -101,11 +108,12 @@ private:
 
     // Keyboard layout
     float keyX_[128], keyW_[128];
+    float keyLayoutUniform_[256] = {0};
+    bool  keyLayoutDirty_ = true;
     bool  keyBlack_[128];
     int   startNote_ = 21, endNote_ = 108;
 
     // Per-frame scratch buffers
-    std::vector<NoteInstance>  notesScratch_;
     std::vector<RectInstance>  rects_;
     std::vector<GradInstance>  grads_;
     std::vector<SkewInstance>  skews_;

@@ -1,4 +1,4 @@
-// native-lib.cpp — JNI surface for com.apfa.PlaybackActivity.
+// native-lib.cpp — JNI surface for com.apfaviz.PlaybackActivity.
 //
 // Threading: nativeLoad runs on PlaybackActivity's background (loading) thread;
 // nativeGetLoadProgress may be polled concurrently from the UI thread. Every
@@ -6,8 +6,10 @@
 // g_engine pointer is therefore the only cross-thread shared state — atomic.
 #include <jni.h>
 #include <atomic>
+#include <cstdio>
 #include <string>
 #include <vector>
+#include <unistd.h>
 
 #include <android/log.h>
 #include <android/native_window.h>
@@ -15,7 +17,7 @@
 
 #include "engine.h"
 
-#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "aPFA", __VA_ARGS__)
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "aPFAViz", __VA_ARGS__)
 
 namespace {
 
@@ -24,6 +26,24 @@ ANativeWindow*             g_window = nullptr;   // UI-thread only
 // Engine::loadError() of the last nativeLoad, stashed here because a failed
 // load's engine is deleted before the UI thread can ask why it failed.
 std::atomic<int>           g_lastLoadError{0};
+
+uint64_t processRssBytes() {
+    // /proc/self/statm's second field is the number of resident pages. This is
+    // deliberately process-wide rather than MidiData::memoryBytes(): while a
+    // MIDI is parsing, the large event/sort/temp vectors still live in local
+    // parser state and are not visible through Engine::midi_ yet. RSS is the
+    // number that matters to Android's memory pressure/OOM decisions.
+    FILE* f = fopen("/proc/self/statm", "r");
+    if (!f) return 0;
+    unsigned long totalPages = 0;
+    unsigned long rssPages = 0;
+    const int got = fscanf(f, "%lu %lu", &totalPages, &rssPages);
+    fclose(f);
+    if (got != 2) return 0;
+    const long pageSize = sysconf(_SC_PAGESIZE);
+    if (pageSize <= 0) return 0;
+    return static_cast<uint64_t>(rssPages) * static_cast<uint64_t>(pageSize);
+}
 
 std::string jstr(JNIEnv* env, jstring s) {
     if (!s) return std::string();
@@ -38,7 +58,7 @@ std::string jstr(JNIEnv* env, jstring s) {
 extern "C" {
 
 JNIEXPORT jboolean JNICALL
-Java_com_apfa_PlaybackActivity_nativeLoad(JNIEnv* env, jobject, jstring midiPath,
+Java_com_apfaviz_PlaybackActivity_nativeLoad(JNIEnv* env, jobject, jstring midiPath,
                                           jstring sfPath, jint voiceCount,
                                           jfloat noteSpeed, jlong cpuMask,
                                           jboolean legacyRenderer,
@@ -68,36 +88,41 @@ Java_com_apfa_PlaybackActivity_nativeLoad(JNIEnv* env, jobject, jstring midiPath
 // Chunked Disk Streaming, 2 = not enough free storage, 3 = pagefile past the
 // volume's file-size limit, 0 = generic).
 JNIEXPORT jint JNICALL
-Java_com_apfa_PlaybackActivity_nativeGetLoadError(JNIEnv*, jobject) {
+Java_com_apfaviz_PlaybackActivity_nativeGetLoadError(JNIEnv*, jobject) {
     return g_lastLoadError.load();
 }
 
 JNIEXPORT jfloat JNICALL
-Java_com_apfa_PlaybackActivity_nativeGetLoadProgress(JNIEnv*, jobject) {
+Java_com_apfaviz_PlaybackActivity_nativeGetLoadProgress(JNIEnv*, jobject) {
     apfa::Engine* e = g_engine.load();
     return e ? e->loadProgress().load() : 0.0f;
 }
 
 JNIEXPORT jlong JNICALL
-Java_com_apfa_PlaybackActivity_nativeGetNoteCount(JNIEnv*, jobject) {
+Java_com_apfaviz_PlaybackActivity_nativeGetProcessMemoryBytes(JNIEnv*, jobject) {
+    return static_cast<jlong>(processRssBytes());
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_apfaviz_PlaybackActivity_nativeGetNoteCount(JNIEnv*, jobject) {
     apfa::Engine* e = g_engine.load();
     return e ? e->noteCount() : 0;
 }
 
 JNIEXPORT jlong JNICALL
-Java_com_apfa_PlaybackActivity_nativeGetMemoryBytes(JNIEnv*, jobject) {
+Java_com_apfaviz_PlaybackActivity_nativeGetMemoryBytes(JNIEnv*, jobject) {
     apfa::Engine* e = g_engine.load();
     return e ? e->memoryBytes() : 0;
 }
 
 extern "C" JNIEXPORT jlong JNICALL
-Java_com_apfa_PlaybackActivity_nativeGetStreamedBytes(JNIEnv*, jobject) {
+Java_com_apfaviz_PlaybackActivity_nativeGetStreamedBytes(JNIEnv*, jobject) {
     apfa::Engine* e = g_engine.load();
     return e ? e->streamedBytes() : 0;
 }
 
 JNIEXPORT void JNICALL
-Java_com_apfa_PlaybackActivity_nativeStart(JNIEnv* env, jobject, jobject surface) {
+Java_com_apfaviz_PlaybackActivity_nativeStart(JNIEnv* env, jobject, jobject surface) {
     apfa::Engine* e = g_engine.load();
     if (!e || !surface) return;
     g_window = ANativeWindow_fromSurface(env, surface);
@@ -109,7 +134,7 @@ Java_com_apfa_PlaybackActivity_nativeStart(JNIEnv* env, jobject, jobject surface
 // next nativeStart re-attaches to the new surface and resumes in place. Deleting
 // the engine here is what used to unload the MIDI and leave a black screen.
 JNIEXPORT void JNICALL
-Java_com_apfa_PlaybackActivity_nativeStop(JNIEnv*, jobject) {
+Java_com_apfaviz_PlaybackActivity_nativeStop(JNIEnv*, jobject) {
     apfa::Engine* e = g_engine.load();
     if (e) e->stop();
     if (g_window) { ANativeWindow_release(g_window); g_window = nullptr; }
@@ -118,58 +143,58 @@ Java_com_apfa_PlaybackActivity_nativeStop(JNIEnv*, jobject) {
 // Full teardown — the activity is actually finishing (onDestroy). Now it's safe
 // to drop the engine and free the MIDI.
 JNIEXPORT void JNICALL
-Java_com_apfa_PlaybackActivity_nativeRelease(JNIEnv*, jobject) {
+Java_com_apfaviz_PlaybackActivity_nativeRelease(JNIEnv*, jobject) {
     apfa::Engine* e = g_engine.exchange(nullptr);
     if (e) { e->stop(); delete e; }
     if (g_window) { ANativeWindow_release(g_window); g_window = nullptr; }
 }
 
 JNIEXPORT void JNICALL
-Java_com_apfa_PlaybackActivity_nativeSurfaceChanged(JNIEnv*, jobject,
+Java_com_apfaviz_PlaybackActivity_nativeSurfaceChanged(JNIEnv*, jobject,
                                                     jint w, jint h) {
     apfa::Engine* e = g_engine.load();
     if (e) e->surfaceChanged(w, h);
 }
 
 JNIEXPORT void JNICALL
-Java_com_apfa_PlaybackActivity_nativePause(JNIEnv*, jobject) {
+Java_com_apfaviz_PlaybackActivity_nativePause(JNIEnv*, jobject) {
     apfa::Engine* e = g_engine.load();
     if (e) e->pause();
 }
 
 JNIEXPORT void JNICALL
-Java_com_apfa_PlaybackActivity_nativeResume(JNIEnv*, jobject) {
+Java_com_apfaviz_PlaybackActivity_nativeResume(JNIEnv*, jobject) {
     apfa::Engine* e = g_engine.load();
     if (e) e->resume();
 }
 
 JNIEXPORT void JNICALL
-Java_com_apfa_PlaybackActivity_nativeSeek(JNIEnv*, jobject, jlong micros) {
+Java_com_apfaviz_PlaybackActivity_nativeSeek(JNIEnv*, jobject, jlong micros) {
     apfa::Engine* e = g_engine.load();
     if (e) e->seek(static_cast<int64_t>(micros));
 }
 
 JNIEXPORT jboolean JNICALL
-Java_com_apfa_PlaybackActivity_nativeIsPlaying(JNIEnv*, jobject) {
+Java_com_apfaviz_PlaybackActivity_nativeIsPlaying(JNIEnv*, jobject) {
     apfa::Engine* e = g_engine.load();
     return (e && e->isPlaying()) ? JNI_TRUE : JNI_FALSE;
 }
 
 // 0 = none/still starting/ok; non-zero = Engine::StartError (1 synth, 2 renderer).
 JNIEXPORT jint JNICALL
-Java_com_apfa_PlaybackActivity_nativeGetStartError(JNIEnv*, jobject) {
+Java_com_apfaviz_PlaybackActivity_nativeGetStartError(JNIEnv*, jobject) {
     apfa::Engine* e = g_engine.load();
     return e ? e->startError() : 0;
 }
 
 JNIEXPORT jlong JNICALL
-Java_com_apfa_PlaybackActivity_nativeGetTimeMicros(JNIEnv*, jobject) {
+Java_com_apfaviz_PlaybackActivity_nativeGetTimeMicros(JNIEnv*, jobject) {
     apfa::Engine* e = g_engine.load();
     return e ? e->timeUs() : 0;
 }
 
 JNIEXPORT jlong JNICALL
-Java_com_apfa_PlaybackActivity_nativeGetTotalMicros(JNIEnv*, jobject) {
+Java_com_apfaviz_PlaybackActivity_nativeGetTotalMicros(JNIEnv*, jobject) {
     apfa::Engine* e = g_engine.load();
     return e ? e->totalUs() : 0;
 }
@@ -177,43 +202,43 @@ Java_com_apfa_PlaybackActivity_nativeGetTotalMicros(JNIEnv*, jobject) {
 // Seek-bar bounds = PFA's GetMinTime/GetMaxTime. The position slider spans
 // [min, max], so the left edge lands in the -3s pre-roll, like stock PFA.
 JNIEXPORT jlong JNICALL
-Java_com_apfa_PlaybackActivity_nativeGetMinMicros(JNIEnv*, jobject) {
+Java_com_apfaviz_PlaybackActivity_nativeGetMinMicros(JNIEnv*, jobject) {
     apfa::Engine* e = g_engine.load();
     return e ? e->minTimeUs() : 0;
 }
 
 JNIEXPORT jlong JNICALL
-Java_com_apfa_PlaybackActivity_nativeGetMaxMicros(JNIEnv*, jobject) {
+Java_com_apfaviz_PlaybackActivity_nativeGetMaxMicros(JNIEnv*, jobject) {
     apfa::Engine* e = g_engine.load();
     return e ? e->maxTimeUs() : 0;
 }
 
 JNIEXPORT jfloat JNICALL
-Java_com_apfa_PlaybackActivity_nativeGetFps(JNIEnv*, jobject) {
+Java_com_apfaviz_PlaybackActivity_nativeGetFps(JNIEnv*, jobject) {
     apfa::Engine* e = g_engine.load();
     return e ? e->fps() : 0.0f;
 }
 
 JNIEXPORT jint JNICALL
-Java_com_apfa_PlaybackActivity_nativeGetActiveNotes(JNIEnv*, jobject) {
+Java_com_apfaviz_PlaybackActivity_nativeGetActiveNotes(JNIEnv*, jobject) {
     apfa::Engine* e = g_engine.load();
     return e ? e->activeNotes() : 0;
 }
 
 JNIEXPORT jfloat JNICALL
-Java_com_apfa_PlaybackActivity_nativeGetNps(JNIEnv*, jobject) {
+Java_com_apfaviz_PlaybackActivity_nativeGetNps(JNIEnv*, jobject) {
     apfa::Engine* e = g_engine.load();
     return e ? e->nps() : 0.0f;
 }
 
 JNIEXPORT jfloat JNICALL
-Java_com_apfa_PlaybackActivity_nativeGetPeakNps(JNIEnv*, jobject) {
+Java_com_apfaviz_PlaybackActivity_nativeGetPeakNps(JNIEnv*, jobject) {
     apfa::Engine* e = g_engine.load();
     return e ? e->peakNps() : 0.0f;
 }
 
 JNIEXPORT void JNICALL
-Java_com_apfa_PlaybackActivity_nativeSetBgColor(JNIEnv*, jobject, jint bgrColor) {
+Java_com_apfaviz_PlaybackActivity_nativeSetBgColor(JNIEnv*, jobject, jint bgrColor) {
     apfa::Engine* e = g_engine.load();
     if (e) e->setBgColor(static_cast<uint32_t>(bgrColor));
 }
@@ -221,7 +246,7 @@ Java_com_apfa_PlaybackActivity_nativeSetBgColor(JNIEnv*, jobject, jint bgrColor)
 // pixels: Android ARGB_8888 ints (0xAARRGGBB), w*h of them. Converted to tightly
 // packed RGBA bytes (row 0 = top) and handed to the engine for GL upload.
 JNIEXPORT void JNICALL
-Java_com_apfa_PlaybackActivity_nativeSetBgImage(JNIEnv* env, jobject,
+Java_com_apfaviz_PlaybackActivity_nativeSetBgImage(JNIEnv* env, jobject,
                                                 jintArray pixels, jint w, jint h) {
     apfa::Engine* e = g_engine.load();
     if (!e) return;
