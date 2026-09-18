@@ -3,6 +3,7 @@ package com.apfa
 import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
+import android.app.Dialog
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
@@ -12,6 +13,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.Typeface
+import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.RippleDrawable
 import android.net.Uri
@@ -36,6 +38,8 @@ import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
+import com.example.liquidglass.GlassMaterial
+import com.example.liquidglass.LiquidGlassView
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -116,10 +120,13 @@ class MainActivity : Activity() {
     // Profile waiting to be written out by the ACTION_CREATE_DOCUMENT result.
     private var pendingExport: JSONObject? = null
 
-    private lateinit var midiButton: Button
     private lateinit var soundfontButton: Button
 
     private data class RecentMidi(val uri: Uri, val name: String)
+
+    // LiquidGlass panels are invalidated only while the launcher scrolls.
+    // This avoids an always-on redraw loop on API 24-32's CPU fallback.
+    private val shellGlassPanels = ArrayList<LiquidGlassView>()
 
     // Shell-only palette. None of this touches native rendering or PFA timing.
     private val uiBg       = Color.rgb(9, 11, 18)
@@ -152,7 +159,7 @@ class MainActivity : Activity() {
     // Old devices (and some OEM pickers, e.g. Huawei EMUI) return file:// URIs from
     // the document picker. Opening those reads the raw /storage path, which needs
     // READ_EXTERNAL_STORAGE. Modern phones (API 33+) always get content:// — no
-    // permission needed, and the permission no longer exists — so we only ask on 23..32.
+    // permission needed, and the permission no longer exists — so we only ask on 24..32.
     private fun ensureStoragePermission() {
         if (Build.VERSION.SDK_INT <= 32) {
             val perm = Manifest.permission.READ_EXTERNAL_STORAGE
@@ -163,18 +170,22 @@ class MainActivity : Activity() {
     }
 
     private fun buildSetupScreen(): View {
+        shellGlassPanels.clear()
         val mp = ViewGroup.LayoutParams.MATCH_PARENT
         val wc = ViewGroup.LayoutParams.WRAP_CONTENT
         val portrait = resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT
 
         val root = FrameLayout(this).apply { setBackgroundColor(uiBg) }
+        // Keep the visual stage in one sibling ViewGroup so LiquidGlass samples
+        // the exact wallpaper + vignette that is actually behind the controls.
+        val backdrop = FrameLayout(this)
         val bg = ImageView(this).apply {
             scaleType = ImageView.ScaleType.CENTER_CROP
             alpha = 0.58f
         }
         loadAsset("apfa-wp.jpg")?.let { bg.setImageBitmap(it) } ?: bg.setBackgroundColor(uiBg)
-        root.addView(bg, FrameLayout.LayoutParams(mp, mp))
-        root.addView(View(this).apply {
+        backdrop.addView(bg, FrameLayout.LayoutParams(mp, mp))
+        backdrop.addView(View(this).apply {
             background = GradientDrawable(
                 GradientDrawable.Orientation.TOP_BOTTOM,
                 intArrayOf(
@@ -184,6 +195,7 @@ class MainActivity : Activity() {
                 )
             )
         }, FrameLayout.LayoutParams(mp, mp))
+        root.addView(backdrop, FrameLayout.LayoutParams(mp, mp))
 
         val scroll = ScrollView(this).apply {
             isFillViewport = true
@@ -217,13 +229,7 @@ class MainActivity : Activity() {
             setTextColor(uiMuted)
             textSize = 12f
         }, LinearLayout.LayoutParams(0, wc, 1f))
-        val gear = Button(this).apply {
-            text = "⚙"
-            contentDescription = "Settings"
-            textSize = 20f
-            setOnClickListener { showSettingsDialog() }
-        }
-        styleShellButton(gear, primary = false, compact = true)
+        val gear = glassIconControl(backdrop, "⚙", "Settings") { showSettingsDialog() }
         header.addView(gear, LinearLayout.LayoutParams(dp(48), dp(48)))
         page.addView(header, LinearLayout.LayoutParams(mp, wc).apply { bottomMargin = dp(20) })
 
@@ -231,8 +237,6 @@ class MainActivity : Activity() {
         val openCard = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(16), dp(16), dp(16))
-            background = shellCardBackground(accented = true)
-            elevation = dp(7).toFloat()
         }
         openCard.addView(TextView(this).apply {
             text = "MIDI"
@@ -246,13 +250,14 @@ class MainActivity : Activity() {
             textSize = 18f
             typeface = Typeface.DEFAULT_BOLD
         }, LinearLayout.LayoutParams(mp, wc).apply { topMargin = dp(4) })
-        midiButton = Button(this).apply {
-            text = "Open MIDI"
-            setOnClickListener { pickFile(REQ_MIDI) }
+        val openAction = glassActionButton(backdrop, "Open MIDI") {
+            pickFile(REQ_MIDI)
         }
-        styleShellButton(midiButton, primary = true)
-        openCard.addView(midiButton, LinearLayout.LayoutParams(mp, dp(56)).apply { topMargin = dp(18) })
-        page.addView(openCard, LinearLayout.LayoutParams(mp, wc))
+        openCard.addView(openAction, LinearLayout.LayoutParams(mp, dp(56)).apply {
+            topMargin = dp(18)
+        })
+        page.addView(glassPanel(openCard, backdrop, accented = true),
+            LinearLayout.LayoutParams(mp, wc))
 
         // Recent files use the persisted SAF URI grants; no duplicate metadata scan.
         val recents = loadRecentMidis()
@@ -264,8 +269,7 @@ class MainActivity : Activity() {
             val recentCard = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 setPadding(dp(8), dp(8), dp(8), dp(8))
-                background = shellCardBackground(accented = false)
-            }
+                }
             recents.forEachIndexed { index, item ->
                 val row = TextView(this).apply {
                     text = item.name
@@ -285,7 +289,7 @@ class MainActivity : Activity() {
                     setBackgroundColor(Color.argb(38, 255, 255, 255))
                 }, LinearLayout.LayoutParams(mp, dp(1)))
             }
-            page.addView(recentCard)
+            page.addView(glassPanel(recentCard, backdrop))
         }
 
         // Compact SoundFont chip row.
@@ -297,8 +301,6 @@ class MainActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(14), dp(8), dp(10), dp(8))
-            background = shellCardBackground(accented = false)
-            setOnClickListener { pickFile(REQ_SOUNDFONT) }
         }
         sfRow.addView(TextView(this).apply {
             text = "SF"
@@ -314,9 +316,10 @@ class MainActivity : Activity() {
             setTextColor(Color.WHITE)
             textSize = 14f
             background = null
+            isClickable = false
+            isFocusable = false
             maxLines = 1
             ellipsize = android.text.TextUtils.TruncateAt.END
-            setOnClickListener { pickFile(REQ_SOUNDFONT) }
         }
         sfRow.addView(soundfontButton, LinearLayout.LayoutParams(0, dp(48), 1f))
         sfRow.addView(TextView(this).apply {
@@ -325,7 +328,15 @@ class MainActivity : Activity() {
             textSize = 24f
             gravity = Gravity.CENTER
         }, LinearLayout.LayoutParams(dp(28), dp(48)))
-        page.addView(sfRow)
+        val sfGlass = glassPanel(sfRow, backdrop, cornerDp = 18).apply {
+            isClickable = true
+            isFocusable = true
+            enablePressEffect = true
+            pressScale = 0.99f
+            elasticity = 0.48f
+            setOnClickListener { pickFile(REQ_SOUNDFONT) }
+        }
+        page.addView(sfGlass)
 
         // Quick settings: exact value is tappable; slider retains fast tuning.
         page.addView(sectionTitle("Quick settings"), LinearLayout.LayoutParams(mp, wc).apply {
@@ -335,14 +346,13 @@ class MainActivity : Activity() {
         val quick = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(16), dp(16), dp(16))
-            background = shellCardBackground(accented = false)
         }
 
-        addVoiceControl(quick)
+        addVoiceControl(quick, backdrop)
         quick.addView(View(this).apply {
             setBackgroundColor(Color.argb(36,255,255,255))
         }, LinearLayout.LayoutParams(mp, dp(1)).apply { topMargin = dp(12); bottomMargin = dp(12) })
-        addSpeedControl(quick)
+        addSpeedControl(quick, backdrop)
 
         val bgRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -377,14 +387,158 @@ class MainActivity : Activity() {
             textSize = 24f
         })
         quick.addView(bgRow, LinearLayout.LayoutParams(mp, wc))
-        page.addView(quick)
+        page.addView(glassPanel(quick, backdrop))
 
         scroll.addView(page, FrameLayout.LayoutParams(mp, wc))
         root.addView(scroll, FrameLayout.LayoutParams(mp, mp))
+        scroll.viewTreeObserver.addOnScrollChangedListener {
+            shellGlassPanels.forEach { it.invalidate() }
+        }
         return root
     }
 
-    private fun addVoiceControl(parent: LinearLayout) {
+    private fun glassActionButton(
+        backdrop: View,
+        label: String,
+        click: () -> Unit
+    ): LiquidGlassView =
+        LiquidGlassView(this).apply {
+            cornerRadius = dp(17).toFloat()
+            material = GlassMaterial.CLEAR
+            blurAmount = 0.12f
+            saturation = 128f
+            refractionHeight = dp(19).toFloat()
+            bevelWidth = dp(15).toFloat()
+            refractionFalloff = 2.7f
+            dispersionStrength = 0.12f
+            enablePressEffect = true
+            pressScale = 0.99f
+            elasticity = 0.56f
+            enableDynamicBackground = false
+            collectFrameStats = false
+            backdropSource = backdrop
+            setGlassTint(uiAccent, 0.50f)
+            isClickable = true
+            isFocusable = true
+            addView(TextView(this@MainActivity).apply {
+                text = label
+                gravity = Gravity.CENTER
+                setTextColor(Color.WHITE)
+                textSize = 15f
+                typeface = Typeface.DEFAULT_BOLD
+            }, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            ))
+            setOnClickListener { click() }
+            shellGlassPanels.add(this)
+        }
+
+    private fun glassIconControl(
+        backdrop: View,
+        glyph: String,
+        description: String,
+        click: () -> Unit
+    ): LiquidGlassView =
+        LiquidGlassView(this).apply {
+            cornerRadius = dp(16).toFloat()
+            material = GlassMaterial.CLEAR
+            blurAmount = 0.10f
+            saturation = 122f
+            refractionHeight = dp(15).toFloat()
+            bevelWidth = dp(12).toFloat()
+            refractionFalloff = 2.7f
+            dispersionStrength = 0.09f
+            enablePressEffect = true
+            pressScale = 0.99f
+            elasticity = 0.52f
+            enableDynamicBackground = false
+            collectFrameStats = false
+            backdropSource = backdrop
+            setGlassTint(Color.rgb(27, 31, 47), 0.30f)
+            isClickable = true
+            isFocusable = true
+            contentDescription = description
+            addView(TextView(this@MainActivity).apply {
+                text = glyph
+                setTextColor(Color.WHITE)
+                textSize = 20f
+                gravity = Gravity.CENTER
+            }, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            ))
+            setOnClickListener { click() }
+            shellGlassPanels.add(this)
+        }
+
+    private fun glassValuePill(label: TextView, backdrop: View): LiquidGlassView =
+        LiquidGlassView(this).apply {
+            cornerRadius = dp(14).toFloat()
+            material = GlassMaterial.CLEAR
+            blurAmount = 0.075f
+            saturation = 120f
+            refractionHeight = dp(11).toFloat()
+            bevelWidth = dp(10).toFloat()
+            refractionFalloff = 2.6f
+            dispersionStrength = 0.055f
+            enablePressEffect = true
+            pressScale = 0.995f
+            elasticity = 0.50f
+            enableDynamicBackground = false
+            collectFrameStats = false
+            backdropSource = backdrop
+            setGlassTint(uiAccent2, 0.16f)
+            isClickable = true
+            isFocusable = true
+            label.isClickable = false
+            addView(label, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                dp(40),
+                Gravity.CENTER
+            ))
+            setOnClickListener { label.performClick() }
+            shellGlassPanels.add(this)
+        }
+
+    private fun glassPanel(
+        content: View,
+        backdrop: View,
+        accented: Boolean = false,
+        cornerDp: Int = 22
+    ): LiquidGlassView =
+        LiquidGlassView(this).apply {
+            cornerRadius = dp(cornerDp).toFloat()
+            elevation = dp(if (accented) 8 else 5).toFloat()
+            material = GlassMaterial.REGULAR
+            blurAmount = if (accented) 0.14f else 0.10f
+            saturation = 124f
+            refractionHeight = dp(if (accented) 30 else 21).toFloat()
+            bevelWidth = dp(if (accented) 22 else 18).toFloat()
+            refractionFalloff = 2.6f
+            dispersionStrength = if (accented) 0.13f else 0.075f
+            enableSensorHighlight = false
+            enableAdaptiveTint = false
+            enablePressEffect = true
+            pressScale = 0.997f
+            elasticity = 0.22f
+            collectFrameStats = false
+            // We invalidate these panels from the ScrollView's scroll callback
+            // instead of continuously redrawing them while the launcher is idle.
+            enableDynamicBackground = false
+            backdropSource = backdrop
+            setGlassTint(
+                if (accented) uiAccent else Color.rgb(18, 21, 32),
+                if (accented) 0.18f else 0.24f
+            )
+            addView(content, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ))
+            shellGlassPanels.add(this)
+        }
+
+    private fun addVoiceControl(parent: LinearLayout, backdrop: View) {
         val header = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -403,7 +557,7 @@ class MainActivity : Activity() {
             setPadding(dp(12), dp(8), dp(12), dp(8))
             setOnClickListener { showVoiceInput() }
         }
-        header.addView(value)
+        header.addView(glassValuePill(value, backdrop))
         parent.addView(header)
         val bar = SeekBar(this).apply {
             max = 499
@@ -419,7 +573,7 @@ class MainActivity : Activity() {
         parent.addView(rangeLabels("1", "500"))
     }
 
-    private fun addSpeedControl(parent: LinearLayout) {
+    private fun addSpeedControl(parent: LinearLayout, backdrop: View) {
         val header = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -438,7 +592,7 @@ class MainActivity : Activity() {
             setPadding(dp(12), dp(8), dp(12), dp(8))
             setOnClickListener { showSpeedInput() }
         }
-        header.addView(value)
+        header.addView(glassValuePill(value, backdrop))
         parent.addView(header)
         val bar = SeekBar(this).apply {
             max = 1000
@@ -570,36 +724,115 @@ class MainActivity : Activity() {
     }
 
     private fun showSettingsDialog() {
-        val root = LinearLayout(this).apply {
+        val dialog = Dialog(this)
+        val activityBackdrop = findViewById<View>(android.R.id.content)
+
+        val sheetContent = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(8), dp(16), dp(8))
+            setPadding(dp(20), dp(18), dp(20), dp(18))
         }
+
+        val titleRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        titleRow.addView(TextView(this).apply {
+            text = "Settings"
+            setTextColor(Color.WHITE)
+            textSize = 22f
+            typeface = Typeface.DEFAULT_BOLD
+        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        titleRow.addView(TextView(this).apply {
+            text = "×"
+            contentDescription = "Close settings"
+            setTextColor(Color.rgb(220, 225, 238))
+            textSize = 26f
+            gravity = Gravity.CENTER
+            setOnClickListener { dialog.dismiss() }
+        }, LinearLayout.LayoutParams(dp(44), dp(44)))
+        sheetContent.addView(titleRow)
+
         fun group(title: String) {
-            root.addView(TextView(this).apply {
+            sheetContent.addView(TextView(this).apply {
                 text = title.uppercase()
                 setTextColor(uiAccent2)
-                textSize = 11f
+                textSize = 10f
                 typeface = Typeface.DEFAULT_BOLD
-                letterSpacing = 0.12f
+                letterSpacing = 0.15f
             }, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply { topMargin = dp(12); bottomMargin = dp(4) })
+            ).apply { topMargin = dp(18); bottomMargin = dp(5) })
         }
+
         fun action(title: String, subtitle: String, click: () -> Unit) {
             val row = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(dp(12), dp(10), dp(12), dp(10))
-                setOnClickListener { click() }
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(12), dp(10), dp(8), dp(10))
+                background = GradientDrawable().apply {
+                    cornerRadius = dp(15).toFloat()
+                    setColor(Color.argb(72, 6, 9, 18))
+                    setStroke(dp(1), Color.argb(58, 255, 255, 255))
+                }
             }
-            row.addView(TextView(this).apply {
-                text = title; setTextColor(Color.WHITE); textSize = 14f
+            val copy = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            copy.addView(TextView(this).apply {
+                text = title
+                setTextColor(Color.WHITE)
+                textSize = 14f
                 typeface = Typeface.DEFAULT_BOLD
             })
+            copy.addView(TextView(this).apply {
+                text = subtitle
+                setTextColor(Color.rgb(205, 211, 226))
+                textSize = 12f
+                maxLines = 2
+            }, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(2) })
+            row.addView(copy, LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f
+            ))
             row.addView(TextView(this).apply {
-                text = subtitle; setTextColor(uiMuted); textSize = 12f
-            })
-            root.addView(row)
+                text = "›"
+                setTextColor(Color.rgb(196, 203, 222))
+                textSize = 24f
+                gravity = Gravity.CENTER
+            }, LinearLayout.LayoutParams(dp(30), dp(44)))
+            val rowGlass = LiquidGlassView(this).apply {
+                cornerRadius = dp(16).toFloat()
+                material = GlassMaterial.CLEAR
+                blurAmount = 0.10f
+                saturation = 116f
+                refractionHeight = dp(13).toFloat()
+                bevelWidth = dp(11).toFloat()
+                refractionFalloff = 2.7f
+                dispersionStrength = 0.065f
+                enablePressEffect = true
+                pressScale = 0.995f
+                elasticity = 0.48f
+                enableDynamicBackground = false
+                collectFrameStats = false
+                backdropSource = activityBackdrop
+                setGlassTint(Color.rgb(9, 12, 22), 0.46f)
+                isClickable = true
+                isFocusable = true
+                addView(row, FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ))
+                setOnClickListener {
+                    dialog.dismiss()
+                    click()
+                }
+            }
+            row.isClickable = false
+            sheetContent.addView(rowGlass, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dp(8) })
         }
 
         group("Performance")
@@ -614,16 +847,76 @@ class MainActivity : Activity() {
         action("aPFA v${appVersion()}", "Starzainia × HexagonMIDIs") {
             AlertDialog.Builder(this)
                 .setTitle("About aPFA")
-                .setMessage("aPFA v${appVersion()}\n\nStarzainia × HexagonMIDIs\n\nA PFA-faithful Android MIDI player.")
+                .setMessage(
+                    "aPFA v${appVersion()}\n\nStarzainia × HexagonMIDIs\n\n" +
+                    "A PFA-faithful Android MIDI player.\n\n" +
+                    "LiquidGlass Android by pandadog / QWEA0 — MIT License."
+                )
                 .setPositiveButton("OK", null)
                 .show()
         }
 
-        AlertDialog.Builder(this)
-            .setTitle("Settings")
-            .setView(ScrollView(this).apply { addView(root) })
-            .setPositiveButton("Done", null)
-            .show()
+        val glass = LiquidGlassView(this).apply {
+            cornerRadius = dp(30).toFloat()
+            material = GlassMaterial.REGULAR
+            blurAmount = 0.22f
+            saturation = 112f
+            refractionHeight = dp(27).toFloat()
+            bevelWidth = dp(22).toFloat()
+            refractionFalloff = 2.7f
+            dispersionStrength = 0.10f
+            enableSensorHighlight = false
+            enableAdaptiveTint = false
+            enableDynamicBackground = false
+            enablePressEffect = false
+            collectFrameStats = false
+            backdropSource = activityBackdrop
+            setGlassTint(Color.rgb(8, 10, 20), 0.62f)
+            addView(ScrollView(this@MainActivity).apply {
+                overScrollMode = View.OVER_SCROLL_NEVER
+                addView(sheetContent)
+            }, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ))
+        }
+
+        val outer = FrameLayout(this).apply {
+            setPadding(dp(14), dp(14), dp(14), dp(18))
+            addView(glass, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { gravity = Gravity.BOTTOM })
+        }
+
+        dialog.setContentView(outer)
+        dialog.setCanceledOnTouchOutside(true)
+        dialog.window?.apply {
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+            setDimAmount(0.34f)
+            setWindowAnimations(0)
+            setGravity(Gravity.BOTTOM)
+        }
+        dialog.show()
+        dialog.window?.apply {
+            decorView.setPadding(0, 0, 0, 0)
+            setLayout(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        }
+        animateGlassInDialog(glass)
+    }
+
+    private fun animateGlassInDialog(view: View) {
+        view.alpha = 0f
+        view.translationY = dp(22).toFloat()
+        view.animate()
+            .alpha(1f)
+            .translationY(0f)
+            .setDuration(240L)
+            .start()
     }
 
     // --- Advanced Settings dialog ---------------------------------------------
