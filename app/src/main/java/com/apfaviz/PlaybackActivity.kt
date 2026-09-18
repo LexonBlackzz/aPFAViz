@@ -521,8 +521,8 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
             ViewGroup.LayoutParams.WRAP_CONTENT
         ).apply { topMargin = dp(6) })
 
-        val fileGlass = liquidSurface(
-            fileCard, backdrop, Color.rgb(24, 27, 43), 0.25f, 24, false
+        val fileGlass = matteSurface(
+            fileCard, Color.rgb(20, 23, 35), 24
         )
         page.addView(fileGlass, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -560,8 +560,8 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
             maxLines = 1
             ellipsize = android.text.TextUtils.TruncateAt.END
         }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        val sfGlass = liquidSurface(
-            sfChipContent, backdrop, Color.rgb(16, 36, 38), 0.22f, 19, false
+        val sfGlass = matteSurface(
+            sfChipContent, Color.rgb(14, 31, 33), 19
         )
         page.addView(sfGlass)
 
@@ -588,8 +588,8 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
         ).apply { topMargin = dp(11); bottomMargin = dp(11) })
         quick.addView(readyMetricRow("Note Speed", "%.3f×".format(noteSpeed)))
 
-        val quickGlass = liquidSurface(
-            quick, backdrop, Color.rgb(22, 25, 40), 0.22f, 22, false
+        val quickGlass = matteSurface(
+            quick, Color.rgb(19, 22, 34), 22
         )
         page.addView(quickGlass)
 
@@ -605,11 +605,8 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
             textSize = 17f
             typeface = Typeface.DEFAULT_BOLD
         }
-        val playGlass = liquidSurface(
-            playContent, backdrop, Color.rgb(139, 92, 246), 0.46f, 22, true
-        ).apply {
+        val playGlass = solidPrimarySurface(playContent).apply {
             setOnClickListener { showPlaybackScreen() }
-            elevation = dp(12).toFloat()
         }
         root.addView(playGlass, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, dp(62)
@@ -673,8 +670,8 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
             })
         }
 
-        glow(Color.argb(125, 139, 92, 246), 260, Gravity.TOP or Gravity.END, dp(-50), dp(-45))
-        glow(Color.argb(105, 45, 212, 191), 230, Gravity.BOTTOM or Gravity.START, dp(-55), dp(10))
+        glow(Color.argb(165, 139, 92, 246), 290, Gravity.TOP or Gravity.END, dp(-60), dp(-50))
+        glow(Color.argb(142, 45, 212, 191), 255, Gravity.BOTTOM or Gravity.START, dp(-60), dp(12))
         stage.addView(View(this).apply {
             background = GradientDrawable(
                 GradientDrawable.Orientation.TOP_BOTTOM,
@@ -685,6 +682,47 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
             ViewGroup.LayoutParams.MATCH_PARENT
         ))
         return stage
+    }
+
+    private fun matteSurface(
+        content: View,
+        color: Int,
+        cornerDp: Int
+    ): View =
+        FrameLayout(this).apply {
+            elevation = dp(3).toFloat()
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(cornerDp).toFloat()
+                setColor(color)
+                setStroke(dp(1), Color.argb(58, 255, 255, 255))
+            }
+            addView(content, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ))
+        }
+
+    private fun solidPrimarySurface(content: View): View {
+        val shape = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = dp(22).toFloat()
+            setColor(Color.rgb(126, 76, 235))
+        }
+        return FrameLayout(this).apply {
+            background = RippleDrawable(
+                ColorStateList.valueOf(Color.argb(58, 255, 255, 255)),
+                shape,
+                null
+            )
+            elevation = dp(10).toFloat()
+            isClickable = true
+            isFocusable = true
+            addView(content, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            ))
+        }
     }
 
     private fun liquidSurface(
@@ -720,24 +758,23 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
         return LiquidGlassView(this).apply {
             cornerRadius = dp(cornerDp).toFloat()
             material = GlassMaterial.REGULAR
-            blurAmount = 0.13f
-            saturation = 126f
-            refractionHeight = dp(if (interactive) 29 else 23).toFloat()
-            bevelWidth = dp(if (interactive) 20 else 18).toFloat()
-            refractionFalloff = 2.65f
-            dispersionStrength = if (interactive) 0.14f else 0.085f
+            blurAmount = 0.29f
+            saturation = 146f
+            refractionHeight = dp(18).toFloat()
+            bevelWidth = dp(12).toFloat()
+            refractionFalloff = 3.15f
+            dispersionStrength = 0.04f
             enableSensorHighlight = false
             enableAdaptiveTint = false
             enableDynamicBackground = false
-            // LiquidGlass' elasticity stretches the axis toward the held/dragged
-            // point, then springs back. Passive cards get a subtle amount; the
-            // primary Play control gets the more obvious liquid response.
-            enablePressEffect = true
-            pressScale = if (interactive) 0.99f else 0.997f
-            elasticity = if (interactive) 0.58f else 0.24f
+            enablePressEffect = interactive
+            pressScale = if (interactive) 0.985f else 1.0f
+            elasticity = if (interactive) 0.16f else 0.0f
             collectFrameStats = false
             backdropSource = backdrop
-            setGlassTint(tint, strength)
+            // Neutral, low-alpha tint reads as glass instead of gray plastic.
+            setGlassTint(Color.WHITE, 0.085f)
+            elevation = dp(12).toFloat()
             addView(content, FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
