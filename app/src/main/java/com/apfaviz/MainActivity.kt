@@ -543,7 +543,6 @@ class MainActivity : Activity() {
 
     private fun glassValuePill(
         label: TextView,
-        backdrop: View,
         click: () -> Unit
     ): View {
         // Controls inside a card stay flat; nested glass is muddy and expensive.
@@ -626,7 +625,7 @@ class MainActivity : Activity() {
         }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(34)).apply {
             marginEnd = dp(7)
         })
-        header.addView(glassValuePill(value, backdrop) { showVoiceInput() })
+        header.addView(glassValuePill(value) { showVoiceInput() })
         parent.addView(header)
 
         val bar = LensSettingSlider(this).apply {
@@ -677,7 +676,7 @@ class MainActivity : Activity() {
         }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(34)).apply {
             marginEnd = dp(7)
         })
-        header.addView(glassValuePill(value, backdrop) { showSpeedInput() })
+        header.addView(glassValuePill(value) { showSpeedInput() })
         parent.addView(header)
 
         val bar = LensSettingSlider(this).apply {
