@@ -662,6 +662,13 @@ void Engine::frame() {
                      3.0f * noteSpeed_, whiteInstances_, sharpInstances_, keyColor_);
     // eglSwapBuffers is called inside renderer_->render(); it stalls here until
     // vblank. That stall is part of lastWall_ -> now on the next frame.
+    uint64_t tPresented = nowUs();
+    uint64_t rUs = tPresented - tEnd;
+    sumRenderUs_ += rUs;
+    if (rUs > maxRenderUs_) maxRenderUs_ = rUs;
+    size_t visibleNow = whiteInstances_.size() + sharpInstances_.size();
+    visibleSum_ += visibleNow;
+    if (visibleNow > visibleMax_) visibleMax_ = visibleNow;
 
     // --- metrics ---
     pubTimeUs_.store(static_cast<int64_t>(clockUs_));
@@ -703,9 +710,13 @@ void Engine::frame() {
         if (gFloor < voiceCount_)
             LOGI("guard: voices %d now, %d low this window (ceiling %d)",
                  gVoices, gFloor, voiceCount_);
-        LOGI("frame: dispatch %.1f/%.1f | build %.1f/%.1f ms avg/max",
+        LOGI("frame: dispatch %.1f/%.1f | build %.1f/%.1f | render %.1f/%.1f ms avg/max",
              sumDispatchUs_ * inv / 1000.0, maxDispatchUs_ / 1000.0,
-             sumBuildUs_    * inv / 1000.0, maxBuildUs_    / 1000.0);
+             sumBuildUs_    * inv / 1000.0, maxBuildUs_    / 1000.0,
+             sumRenderUs_   * inv / 1000.0, maxRenderUs_   / 1000.0);
+        LOGI("visible: %llu avg | %zu max",
+             static_cast<unsigned long long>(frames > 0 ? visibleSum_ / frames : 0),
+             visibleMax_);
         // Twin of PFA's PerfLog "state:" line — same columns, same order.
         LOGI("state: poly %llu avg %llu max | %.0f ev/s",
              static_cast<unsigned long long>(frames > 0 ? polySum_ / frames : 0),
@@ -734,8 +745,10 @@ void Engine::frame() {
                  streamer_.windowBytes() / 1048576.0,
                  streamer_.memAvailBytes() / 1048576.0);
 #endif
-        sumDispatchUs_ = sumBuildUs_ = 0;
-        maxDispatchUs_ = maxBuildUs_ = 0;
+        sumDispatchUs_ = sumBuildUs_ = sumRenderUs_ = 0;
+        maxDispatchUs_ = maxBuildUs_ = maxRenderUs_ = 0;
+        visibleSum_ = 0;
+        visibleMax_ = 0;
         polySum_ = polyMax_ = dispEvents_ = 0;
         noteOnsWindow_ = 0;
     }
