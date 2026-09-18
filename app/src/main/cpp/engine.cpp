@@ -929,21 +929,15 @@ void Engine::applySeek(int64_t target) {
         pubTimeUs_.store(static_cast<int64_t>(clockUs_));
         return;
     }
-    if (streamer_.isOpen()) {
-        // Identical result to the loop below, computed from the resident
-        // sister-position table instead of dereferencing every historical
-        // event (which would fault the whole cold pool in random order).
-        // A note-on at position j is still sounding iff its note-off sits at
-        // position >= lo: events[] is time-sorted, so "off position >= lo"
-        // and "off time > target" are the same predicate.
+    if (streamer_.isSliced()) {
+        // Sliced mode cannot dereference arbitrary historical events, so it
+        // retains the compact resident partner-position table.
         for (size_t j = 0; j < eventCursor_; j++) {
-            uint32_t s = streamer_.sisterPosAt(j);
-            if (Streamer::linkIsNoteOn(s) &&
-                static_cast<size_t>(Streamer::linkPartner(s)) >= eventCursor_)
+            uint32_t link = streamer_.sisterPosAt(j);
+            if (Streamer::linkIsNoteOn(link) &&
+                static_cast<size_t>(Streamer::linkPartner(link)) >= eventCursor_)
                 active_.push_back(static_cast<int>(j));
         }
-        // Warm what the next frame reads (visible band, the active notes and
-        // their offs) before the param1 dereferences below.
         streamer_.warmSeek(target,
                            target + static_cast<int64_t>(3000000.0 * noteSpeed_),
                            active_);
@@ -951,12 +945,25 @@ void Engine::applySeek(int64_t target) {
             noteState_[ev[j]->param1] = j;
     } else
 #endif
-    for (size_t j = 0; j < eventCursor_; j++) {
-        const PlayEvent* e = ev[j];
-        if (e->isNoteOn() && static_cast<int64_t>(e->link) > target) {
-            active_.push_back(static_cast<int>(j));
-            noteState_[e->param1] = static_cast<int>(j);
+    {
+        // In-RAM and normal full-pool streaming both have every event mapped.
+        // Note-ons carry their end timestamp directly, so no partner table is
+        // required. A seek may fault cold pool pages; seeking is a deliberate
+        // operation and this trades a little seek latency for much lower
+        // session/parse memory.
+        for (size_t j = 0; j < eventCursor_; j++) {
+            const PlayEvent* e = ev[j];
+            if (e->isNoteOn() && static_cast<int64_t>(e->link) > target) {
+                active_.push_back(static_cast<int>(j));
+                noteState_[e->param1] = static_cast<int>(j);
+            }
         }
+#ifdef APFA_STREAMING
+        if (streamer_.isOpen())
+            streamer_.warmSeek(target,
+                               target + static_cast<int64_t>(3000000.0 * noteSpeed_),
+                               active_);
+#endif
     }
 
     synth_.allNotesOff();
