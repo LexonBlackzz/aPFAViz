@@ -316,6 +316,8 @@ class MainActivity : Activity() {
             setTextColor(Color.WHITE)
             textSize = 14f
             background = null
+            isClickable = false
+            isFocusable = false
             maxLines = 1
             ellipsize = android.text.TextUtils.TruncateAt.END
         }
