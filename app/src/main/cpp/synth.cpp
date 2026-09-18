@@ -1,6 +1,9 @@
 // synth.cpp — see synth.h.
 #include "synth.h"
 
+#include <algorithm>
+#include <cmath>
+#include <cstring>
 #include <time.h>
 #include <unistd.h>
 #include "platform.h"
@@ -18,31 +21,105 @@ static uint64_t nowUs() {
     return static_cast<uint64_t>(ts.tv_sec) * 1000000ull + ts.tv_nsec / 1000;
 }
 
-// --- limiter ----------------------------------------------------------------
-static float g_limEnv    = 0.0f;
-static bool  g_limActive = false;
+// --- transparent master DSP --------------------------------------------------
+// Inspired by the audio discipline in SuperVirtualMIDISynth: stereo-linked
+// dynamics, a short lookahead, and a subsonic/DC blocker. The old aPFAViz DSP
+// used a 0.60 ceiling and one envelope over individual interleaved samples,
+// which audibly flattened dense chords and let left/right samples influence
+// each other as if they were successive mono samples.
+//
+// This state is touched only by BASS's DSP/update thread after init().
+struct MasterDspState {
+    static constexpr uint32_t kDelayFrames = 512;
+    float delay[kDelayFrames * 2] = {};
+    uint32_t writePos = 0;
+    uint32_t lookahead = 96;      // overwritten from sample rate (~2 ms)
+    float gain = 1.0f;
+    float releaseCoeff = 0.0f;
+    float hpPole = 0.0f;
+    float prevInL = 0.0f, prevInR = 0.0f;
+    float prevOutL = 0.0f, prevOutR = 0.0f;
+    bool active = false;
 
-static void CALLBACK limiterDSP(HDSP, DWORD, void* buffer, DWORD length, void*) {
-    if (!g_limActive) { g_limActive = true; LOGI("limiter DSP running"); }
-    float* p = static_cast<float*>(buffer);
-    const size_t n = length / sizeof(float);
-    const float kCeiling = 0.60f;
-    const float kAttack  = 0.25f;
-    const float kRelease = 0.0001f;
-    float env = g_limEnv;
-    for (size_t i = 0; i < n; i++) {
-        float s = p[i];
-        float a = s < 0.0f ? -s : s;
-        env += (a > env ? kAttack : kRelease) * (a - env);
-        if (env > kCeiling) s *= kCeiling / env;
-        if      (s >  1.0f) s =  1.0f;
-        else if (s < -1.0f) s = -1.0f;
-        p[i] = s;
+    void reset(int sampleRate) {
+        std::memset(delay, 0, sizeof(delay));
+        writePos = 0;
+        const int sr = sampleRate > 0 ? sampleRate : 48000;
+        lookahead = static_cast<uint32_t>(
+            std::max(1, std::min<int>(kDelayFrames - 1, sr * 2 / 1000)));
+        // ~80 ms recovery: fast enough not to leave the song ducked after a
+        // wall, slow enough not to pump between individual Black-MIDI peaks.
+        releaseCoeff = 1.0f - std::exp(-1.0f / (0.080f * sr));
+        hpPole = std::exp(-6.28318530718f * 3.0f / sr);
+        gain = 1.0f;
+        prevInL = prevInR = prevOutL = prevOutR = 0.0f;
+        active = false;
     }
-    g_limEnv = env;
+
+    inline void highPass(float& l, float& r) {
+        const float yl = l - prevInL + hpPole * prevOutL;
+        const float yr = r - prevInR + hpPole * prevOutR;
+        prevInL = l; prevInR = r;
+        prevOutL = yl; prevOutR = yr;
+        l = yl; r = yr;
+    }
+
+    void process(float* p, size_t samples) {
+        if (!p || samples < 2) return;
+        constexpr float kThreshold = 0.985f;
+        constexpr float kSafety = 0.9995f;
+
+        const size_t frames = samples / 2;
+        for (size_t f = 0; f < frames; ++f) {
+            const float inL = p[f * 2];
+            const float inR = p[f * 2 + 1];
+            const float peak = std::max(std::fabs(inL), std::fabs(inR));
+            const float required =
+                (peak > kThreshold && peak > 0.0f) ? kThreshold / peak : 1.0f;
+
+            // Immediate gain reduction plus a slow release. Because the audible
+            // sample is delayed by lookahead frames, the detector sees a peak
+            // before that peak reaches the output without needing a costly
+            // sliding-max structure.
+            if (required < gain) gain = required;
+            else gain += releaseCoeff * (required - gain);
+
+            const uint32_t readPos =
+                (writePos + kDelayFrames - lookahead) % kDelayFrames;
+            float outL = delay[readPos * 2] * gain;
+            float outR = delay[readPos * 2 + 1] * gain;
+
+            delay[writePos * 2] = inL;
+            delay[writePos * 2 + 1] = inR;
+            writePos = (writePos + 1) % kDelayFrames;
+
+            // Stereo-linked final safety catch; unlike independent clipping it
+            // cannot pull the stereo image sideways on a loud asymmetric peak.
+            const float outPeak = std::max(std::fabs(outL), std::fabs(outR));
+            if (outPeak > kSafety) {
+                const float scale = kSafety / outPeak;
+                outL *= scale;
+                outR *= scale;
+            }
+
+            highPass(outL, outR);
+            p[f * 2] = outL;
+            p[f * 2 + 1] = outR;
+        }
+    }
+};
+
+static MasterDspState g_masterDsp;
+
+static void CALLBACK masterDSP(HDSP, DWORD, void* buffer, DWORD length, void*) {
+    if (!g_masterDsp.active) {
+        g_masterDsp.active = true;
+        LOGI("master DSP running: stereo-linked lookahead limiter + 3 Hz HPF");
+    }
+    g_masterDsp.process(static_cast<float*>(buffer), length / sizeof(float));
 }
 
-// ---------------------------------------------------------------------------
+
 
 bool Synth::init(int voiceLimit, int sampleRate) {
     sampleRate_ = sampleRate;
@@ -51,10 +128,14 @@ bool Synth::init(int voiceLimit, int sampleRate) {
         return false;
     }
     BASS_SetConfig(BASS_CONFIG_MIDI_VOICES, 100000);
+    // Keep enough safety margin for older phones. Event timing is decoupled
+    // from the visual frame by the scheduler rather than by making the device
+    // buffer dangerously small.
     BASS_SetConfig(BASS_CONFIG_BUFFER, 100);
     BASS_SetConfig(BASS_CONFIG_UPDATEPERIOD, 10);
 
-    midiStream_ = BASS_MIDI_StreamCreate(16, BASS_SAMPLE_FLOAT, sampleRate_);
+    midiStream_ = BASS_MIDI_StreamCreate(
+        16, BASS_SAMPLE_FLOAT | BASS_MIDI_ASYNC, sampleRate_);
     if (!midiStream_) {
         LOGE("BASS_MIDI_StreamCreate failed: %d", BASS_ErrorGetCode());
         return false;
@@ -64,10 +145,25 @@ bool Synth::init(int voiceLimit, int sampleRate) {
     setVoiceLimit(voiceLimit);
     voiceCeiling_.store(voiceLimit < 1 ? 1 : voiceLimit);
     voiceCurrent_.store(voiceLimit < 1 ? 1 : voiceLimit);
-    g_limEnv = 0.0f;
-    g_limActive = false;
-    if (!BASS_ChannelSetDSP(midiStream_, &limiterDSP, nullptr, 0))
-        LOGE("limiter DSP attach failed: %d", BASS_ErrorGetCode());
+    // Preallocate the live-event queue so a dense wall does not force BASSMIDI
+    // to grow it on its real-time update path.
+    if (!BASS_ChannelSetAttribute(
+            midiStream_, BASS_ATTRIB_MIDI_QUEUE_ASYNC, 131072.0f))
+        LOGE("BASS async queue preallocation failed: %d", BASS_ErrorGetCode());
+
+    // 16-point sinc is the highest BASSMIDI SoundFont interpolation mode. It
+    // is NEON-accelerated on supported ARM builds. Fall back to 8-point sinc,
+    // then linear, rather than making synth startup fail on an older binary.
+    int srcQuality = 2;
+    if (!BASS_ChannelSetAttribute(midiStream_, BASS_ATTRIB_MIDI_SRC, 2.0f)) {
+        srcQuality = 1;
+        if (!BASS_ChannelSetAttribute(midiStream_, BASS_ATTRIB_MIDI_SRC, 1.0f))
+            srcQuality = 0;
+    }
+
+    g_masterDsp.reset(sampleRate_);
+    if (!BASS_ChannelSetDSP(midiStream_, &masterDSP, nullptr, 0))
+        LOGE("master DSP attach failed: %d", BASS_ErrorGetCode());
 
     // OmniMIDI's own overload setting (BASSSynth.cpp StreamSettings). Kept
     // because it is what the reference synth does and it costs nothing; the
@@ -78,9 +174,9 @@ bool Synth::init(int voiceLimit, int sampleRate) {
     startGuard();
 
     ready_ = true;
-    LOGI("Synth ready: BASSMIDI 0x%08X, %d Hz, voices=%d, raw batch path, "
-         "limiter on, overload guard on",
-         BASS_MIDI_GetVersion(), sampleRate_, voiceLimit);
+    LOGI("Synth ready: BASSMIDI 0x%08X, %d Hz, voices=%d, async queue, "
+         "SRC=%d (0=linear 1=8pt 2=16pt), transparent master DSP, guard on",
+         BASS_MIDI_GetVersion(), sampleRate_, voiceLimit, srcQuality);
     return true;
 }
 
@@ -203,7 +299,33 @@ void Synth::start(uint64_t) {
 // then played back on resume — audible as the previous note's release
 // arriving after you had already seeked somewhere else.
 void Synth::pause() {
-    releaseAllNotes();
+    if (!midiStream_) return;
+
+    // Cancel future async input and release notes in ONE ordered submission.
+    // Keeping pitch untouched preserves PFA's pause/resume behavior.
+    rawBatch_.clear();
+    uint8_t release[16 * 6];
+    size_t n = 0;
+    for (int c = 0; c < 16; ++c) {
+        release[n++] = static_cast<uint8_t>(0xB0 | c);
+        release[n++] = 123;
+        release[n++] = 0;
+        release[n++] = static_cast<uint8_t>(0xB0 | c);
+        release[n++] = 64;
+        release[n++] = 0;
+    }
+    const uint64_t t0 = nowUs();
+    const DWORD done = BASS_MIDI_StreamEvents(
+        midiStream_,
+        BASS_MIDI_EVENTS_RAW | BASS_MIDI_EVENTS_ASYNC |
+            BASS_MIDI_EVENTS_CANCEL,
+        release, static_cast<DWORD>(n));
+    evMicros_.fetch_add(nowUs() - t0, std::memory_order_relaxed);
+    bassCalls_.fetch_add(1, std::memory_order_relaxed);
+    evCalls_.fetch_add(32, std::memory_order_relaxed);
+    if (done == static_cast<DWORD>(-1))
+        LOGE("BASS pause cancel/release failed: %d", BASS_ErrorGetCode());
+    guardArmed_.store(false, std::memory_order_relaxed);
 }
 
 void Synth::resume() {
@@ -235,6 +357,36 @@ void Synth::allNotesOff() {
     flush();
 }
 
+void Synth::resetForSeek() {
+    if (!midiStream_) return;
+
+    // One bounded call both invalidates scheduler work that BASS has not
+    // processed yet and establishes a clean channel baseline. The scheduler
+    // follows this immediately with the latest program/controller/pitch state
+    // selected for the new song position.
+    rawBatch_.clear();
+    uint8_t reset[16 * 9];
+    size_t n = 0;
+    for (int c = 0; c < 16; ++c) {
+        reset[n++] = static_cast<uint8_t>(0xB0 | c); reset[n++] = 123; reset[n++] = 0;
+        reset[n++] = static_cast<uint8_t>(0xB0 | c); reset[n++] = 64;  reset[n++] = 0;
+        reset[n++] = static_cast<uint8_t>(0xE0 | c); reset[n++] = 0;   reset[n++] = 64;
+    }
+
+    const uint64_t t0 = nowUs();
+    const DWORD done = BASS_MIDI_StreamEvents(
+        midiStream_,
+        BASS_MIDI_EVENTS_RAW | BASS_MIDI_EVENTS_ASYNC |
+            BASS_MIDI_EVENTS_CANCEL,
+        reset, static_cast<DWORD>(n));
+    evMicros_.fetch_add(nowUs() - t0, std::memory_order_relaxed);
+    bassCalls_.fetch_add(1, std::memory_order_relaxed);
+    evCalls_.fetch_add(48, std::memory_order_relaxed);
+    if (done == static_cast<DWORD>(-1))
+        LOGE("BASS pending-event cancel/reset failed: %d", BASS_ErrorGetCode());
+    guardArmed_.store(false, std::memory_order_relaxed);
+}
+
 // --- batched raw call path --------------------------------------------------
 // Preserve every raw MIDI message and its order, but amortise the BASS API call
 // overhead. The engine already dispatches all events due for a frame in one
@@ -251,7 +403,7 @@ void Synth::sendRaw(uint8_t status, uint8_t d1, uint8_t d2) {
     rawBatch_.push_back(status);
     rawBatch_.push_back(d1);
     if (!shortMsg) rawBatch_.push_back(d2);
-    ++evCalls_;
+    evCalls_.fetch_add(1, std::memory_order_relaxed);
 }
 
 void Synth::noteOn(int channel, int key, int velocity) {
@@ -274,18 +426,15 @@ void Synth::flush() {
         BASS_MIDI_EVENTS_RAW | BASS_MIDI_EVENTS_ASYNC,
         rawBatch_.data(),
         static_cast<DWORD>(rawBatch_.size()));
-    evMicros_ += nowUs() - t0;
-    ++bassCalls_;
+    evMicros_.fetch_add(nowUs() - t0, std::memory_order_relaxed);
+    bassCalls_.fetch_add(1, std::memory_order_relaxed);
     rawBatch_.clear();
 }
 
 void Synth::sampleEventCost(uint64_t& calls, uint64_t& micros, uint64_t& bpMicros) {
-    calls = evCalls_;
-    micros = evMicros_;
-    bpMicros = bassCalls_;   // reused by Engine's perf log as batch-call count
-    evCalls_ = 0;
-    bassCalls_ = 0;
-    evMicros_ = 0;
+    calls = evCalls_.exchange(0, std::memory_order_relaxed);
+    micros = evMicros_.exchange(0, std::memory_order_relaxed);
+    bpMicros = bassCalls_.exchange(0, std::memory_order_relaxed);
 }
 
 void Synth::shutdown() {

@@ -1,8 +1,9 @@
-// synth.h — BASS + BASSMIDI wrapper, bounded raw-MIDI batch path.
+// synth.h — BASS + BASSMIDI wrapper, bounded raw-MIDI submission path.
 //
-// noteOn/noteOff preserve each MIDI message in order in an engine-thread buffer.
-// The existing frame flush submits those bytes to BASSMIDI in <=64 KiB chunks,
-// avoiding one library/API call per Black-MIDI event while retaining every event.
+// The normal Android path feeds this object from Engine's dedicated MIDI
+// scheduler thread. BASS owns its own render/update thread, so visual GL/vsync
+// stalls no longer sit between a due MIDI event and BASSMIDI. The 32-bit sliced
+// fallback can still feed it from the visual engine thread.
 #pragma once
 
 #include <atomic>
@@ -24,6 +25,10 @@ public:
     void pause();
     void resume();
     void allNotesOff();
+    // Seek/reset boundary: cancel BASSMIDI's pending async events, release all
+    // notes/sustain, and center pitch bend before the scheduler restores MIDI
+    // controller/program state at the new song position.
+    void resetForSeek();
     // Release every sounding note without touching pitch bend — PFA's
     // MIDIOutDevice::AllNotesOff. This is what pause() uses.
     void releaseAllNotes();
@@ -82,13 +87,15 @@ private:
     int  sampleRate_ = 48000;
     bool ready_      = false;
 
-    // Engine-thread-only raw MIDI batching. Every message is preserved in
-    // order, but BASS sees bounded chunks instead of one API call per event.
+    // Single-producer raw MIDI batching. On the separated path the dedicated
+    // scheduler is the sole producer; on the sliced fallback the visual engine
+    // remains the sole producer. Metrics are atomic because the visual perf log
+    // samples them while the scheduler is writing them.
     static constexpr size_t kRawBatchBytes = 64 * 1024;
     std::vector<uint8_t> rawBatch_;
-    uint64_t evCalls_ = 0;        // MIDI messages queued
-    uint64_t bassCalls_ = 0;      // actual BASS_MIDI_StreamEvents calls
-    uint64_t evMicros_ = 0;       // wall time spent submitting batches
+    std::atomic<uint64_t> evCalls_{0};    // MIDI messages queued
+    std::atomic<uint64_t> bassCalls_{0};  // actual BASS_MIDI_StreamEvents calls
+    std::atomic<uint64_t> evMicros_{0};   // wall time spent submitting batches
 };
 
 }  // namespace apfa

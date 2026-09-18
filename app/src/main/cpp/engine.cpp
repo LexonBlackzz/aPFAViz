@@ -3,6 +3,7 @@
 #include "note.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <new>
@@ -384,6 +385,17 @@ void Engine::surfaceChanged(int w, int h) {
     surfH_ = h;
 }
 
+void Engine::pause() {
+    paused_.store(true, std::memory_order_release);
+    pubNps_.store(0.0f, std::memory_order_relaxed);
+    audioCv_.notify_all();
+}
+
+void Engine::resume() {
+    paused_.store(false, std::memory_order_release);
+    audioCv_.notify_all();
+}
+
 #if defined(__ANDROID__)
 // Highest cpuinfo_max_freq wins; among cores TIED at that frequency, the
 // highest-numbered one.
@@ -509,64 +521,83 @@ void Engine::threadMain() {
     LOGI("engine thread QoS = USER_INTERACTIVE (performance-cluster bias)");
 #endif
 
-    // PFA's 3-second pre-roll: the clock starts 3s before the first note and
-    // counts up through "-0:03.0" to 0 before any note fires (GameState.cpp:155,
-    // m_llStartTime = llFirstNote - 3000000).
+    // Start visuals at the same 3-second pre-roll, but on normal/full-pool
+    // playback the authoritative clock now belongs to the MIDI scheduler.
     clockUs_     = firstNoteUs_ - 3000000;
     eventCursor_ = windowCursor_ = pcCursor_ = 0;
+
+    bool separateAudio = true;
 #ifdef APFA_STREAMING
-    // A surface re-attach reuses the open streamer, which may still be sitting
-    // on the slice that was playing. The cursors just went back to 0, so the
-    // mapping has to as well — unless the resume seek below is about to move
-    // both anyway, in which case rewinding first would only build a slice to
-    // throw it straight away.
-    if (streamer_.isSliced() && !hasResume_) streamer_.seekSlice(0, clockUs_);
-#endif
-#ifdef APFA_STREAMING
-    // Read-ahead thread: warms pool pages ahead of the published clock, kept
-    // off the engine core like the BASS render threads. The 3-second pre-roll
-    // doubles as the initial warm-up headroom.
-    if (streamer_.isOpen()) {
-#if defined(__ANDROID__)
-        uint64_t loaderAvoid = engineMask;
-#else
-        uint64_t loaderAvoid = 0;
-#endif
-        streamer_.startLoader(&pubTimeUs_, clockUs_, loaderAvoid);
+    // Sliced 32-bit streaming remaps one event arena as playback advances.
+    // Two independent cursors could otherwise dereference a slice after the
+    // other thread replaces it, so keep the proven coupled path there.
+    if (streamer_.isSliced()) {
+        separateAudio = false;
+        if (!hasResume_) streamer_.seekSlice(0, clockUs_);
+        LOGI("MIDI scheduler: coupled fallback for sliced 32-bit pool");
     }
 #endif
+    decoupledAudio_.store(separateAudio, std::memory_order_release);
+    pubAudioTimeUs_.store(clockUs_, std::memory_order_release);
+
     active_.clear();
     active_.reserve(16384);
-    for (int& s : noteState_) s = -1;
+    for (int& state : noteState_) state = -1;
+
+    // Re-attaching to a fresh surface: rebuild the visual state BEFORE the
+    // scheduler starts, then launch audio directly at that same target.
+    if (hasResume_) {
+        applySeek(resumeUs_);
+        lastWall_ = nowUs();
+        hasResume_ = false;
+    }
+
+#if defined(__ANDROID__)
+    const uint64_t schedulerMask = avoidMask;
+#else
+    const uint64_t schedulerMask = 0;
+#endif
+    if (decoupledAudio_.load(std::memory_order_acquire))
+        startAudioScheduler(clockUs_, schedulerMask);
+
+#ifdef APFA_STREAMING
+    // Read-ahead follows the AUDIO clock when audio is decoupled. A blocked
+    // eglSwapBuffers can therefore never make storage warming trail the sound.
+    if (streamer_.isOpen()) {
+#if defined(__ANDROID__)
+        const uint64_t loaderAvoid = engineMask;
+#else
+        const uint64_t loaderAvoid = 0;
+#endif
+        const std::atomic<int64_t>* playClock =
+            decoupledAudio_.load(std::memory_order_acquire)
+                ? &pubAudioTimeUs_ : &pubTimeUs_;
+        streamer_.startLoader(playClock, clockUs_, loaderAvoid);
+    }
+#endif
+
     lastWall_ = fpsLastUs_ = nowUs();
     cpuLastUs_ = nowThreadCpuUs();
-    // Baseline the fault counters here, not at zero: the load itself faults
-    // heavily, and counting that against the first playing window would read as
-    // a phantom spike right where the answer matters.
     majFltLast_ = threadMajFlt();
     ldrFltLast_ = 0;
 #ifdef APFA_STREAMING
     ldrFltLast_ = streamer_.loaderMajFlt();
 #endif
     polySum_ = polyMax_ = dispEvents_ = 0;
+    audioSubmittedWindow_.store(0, std::memory_order_relaxed);
+    audioLateMaxUs_.store(0, std::memory_order_relaxed);
     noteOnsWindow_ = 0;
     pubActiveNotes_.store(0);
     pubNps_.store(0.0f);
     pubPeakNps_.store(0.0f);
     playing_ = true;
 #ifdef APFA_STREAMING
-    clearLoadMarker();   // load + startup survived: this MIDI fits this mode
+    clearLoadMarker();
 #endif
-    LOGI("engine playing: %zu notes", midi_.noteCount());
-
-    // Re-attaching to a fresh surface (returned from recents): pick up where we
-    // left off instead of replaying the pre-roll. applySeek rebuilds the visible
-    // notes and restores synth instrument/CC state at that position.
-    if (hasResume_) {
-        applySeek(resumeUs_);
-        lastWall_ = nowUs();
-        hasResume_ = false;
-    }
+    LOGI("engine playing: %zu notes | MIDI %s visual thread",
+         midi_.noteCount(),
+         decoupledAudio_.load(std::memory_order_acquire)
+             ? "separate from" : "coupled to");
 
     bool synthPlaying = true;
     while (running_.load()) {
@@ -576,25 +607,35 @@ void Engine::threadMain() {
             lastWall_ = nowUs();
         }
 
-        if (paused_.load()) {
-            if (synthPlaying) { synth_.pause(); synthPlaying = false; }
-            // Still render the paused frame (seek may have moved the view),
-            // then sleep — mirroring PFA's paused Logic()/Render() path.
+        if (paused_.load(std::memory_order_acquire)) {
+            if (decoupledAudio_.load(std::memory_order_acquire)) {
+                clockUs_ = pubAudioTimeUs_.load(std::memory_order_acquire);
+            } else if (synthPlaying) {
+                synth_.pause();
+                synthPlaying = false;
+            }
+            // Still render the paused frame (seek may have moved the view).
             buildVisible();
             int sw = surfW_.load(), sh = surfH_.load();
             if (sw > 0 && sh > 0) renderer_->resize(sw, sh);
             renderer_->setBgColor(bgColor_.load());
             syncBgImage();
-            renderer_->render(clockUs_ * 1e-6f, midi_.totalUs * 1e-6f, pubFps_.load(),
-                             3.0f * noteSpeed_, whiteInstances_, sharpInstances_, keyColor_);
-            usleep(10000);   // 10 ms idle — matches PFA's paused Sleep(10)
+            renderer_->render(clockUs_ * 1e-6f, midi_.totalUs * 1e-6f,
+                             pubFps_.load(), 3.0f * noteSpeed_,
+                             whiteInstances_, sharpInstances_, keyColor_);
+            pubTimeUs_.store(clockUs_, std::memory_order_release);
+            usleep(10000);
             lastWall_ = nowUs();
             continue;
         }
-        if (!synthPlaying) { synth_.resume(); synthPlaying = true; }
+        if (!decoupledAudio_.load(std::memory_order_acquire) && !synthPlaying) {
+            synth_.resume();
+            synthPlaying = true;
+        }
         frame();
     }
 
+    stopAudioScheduler();
 #ifdef APFA_STREAMING
     streamer_.stopLoader();   // the mapping itself stays for a surface re-attach
 #endif
@@ -603,20 +644,245 @@ void Engine::threadMain() {
     playing_ = false;
 }
 
+size_t Engine::cursorAfterTime(int64_t target) const {
+    const std::vector<PlayEvent*>& ev = midi_.events;
+    size_t lo = 0, hi = ev.size();
+    while (lo < hi) {
+        const size_t mid = (lo + hi) / 2;
+        if (static_cast<int64_t>(ev[mid]->absMicroSec) <= target) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo;
+}
+
+void Engine::restoreAudioState(size_t stateCursor) {
+    // Select the LAST value of every controller/program/pitch behind the seek
+    // target, then replay only those selected writes in their ORIGINAL
+    // chronological order. This preserves bank/program relationships better
+    // than issuing the reverse scan directly.
+    struct Raw {
+        uint8_t code, p1, p2;
+    };
+    struct Selected {
+        size_t order;
+        Raw raw;
+    };
+
+    bool haveControl[16][128] = {};
+    bool haveProgram[16] = {};
+    bool havePitch[16] = {};
+    std::vector<Selected> selected;
+    selected.reserve(16 * 16);
+
+    const std::vector<size_t>& pc = midi_.programChangeIdx;
+    if (stateCursor > pc.size()) stateCursor = pc.size();
+
+    for (size_t i = stateCursor; i > 0; --i) {
+        const size_t order = pc[i - 1];
+        const PlayEvent* e = midi_.events[order];
+        const uint8_t code = static_cast<uint8_t>(e->eventCode);
+        const int ch = code & 0x0f;
+        const int type = code >> 4;
+
+        if (type == kController) {
+            if (haveControl[ch][e->param1]) continue;
+            haveControl[ch][e->param1] = true;
+        } else if (type == kProgramChange) {
+            if (haveProgram[ch]) continue;
+            haveProgram[ch] = true;
+        } else if (type == kPitchBend) {
+            if (havePitch[ch]) continue;
+            havePitch[ch] = true;
+        } else {
+            continue;
+        }
+        selected.push_back(Selected{
+            order, Raw{code, e->param1, e->param2}
+        });
+    }
+
+    std::sort(selected.begin(), selected.end(),
+              [](const Selected& a, const Selected& b) {
+                  return a.order < b.order;
+              });
+    for (const Selected& e : selected)
+        synth_.sendRaw(e.raw.code, e.raw.p1, e.raw.p2);
+    synth_.flush();
+}
+
+void Engine::startAudioScheduler(int64_t initialUs, uint64_t affinityMask) {
+    if (audioRun_.exchange(true, std::memory_order_acq_rel)) return;
+    audioAffinityMask_ = affinityMask;
+    audioSeekRequest_.store(INT64_MIN, std::memory_order_relaxed);
+    pubAudioTimeUs_.store(initialUs, std::memory_order_release);
+    try {
+        audioThread_ = std::thread(&Engine::audioMain, this, initialUs);
+    } catch (...) {
+        audioRun_.store(false, std::memory_order_release);
+        decoupledAudio_.store(false, std::memory_order_release);
+        LOGE("could not create MIDI scheduler thread — using coupled fallback");
+    }
+}
+
+void Engine::stopAudioScheduler() {
+    if (!audioRun_.exchange(false, std::memory_order_acq_rel)) return;
+    audioCv_.notify_all();
+    if (audioThread_.joinable()) audioThread_.join();
+}
+
+void Engine::audioMain(int64_t initialUs) {
+#if defined(__ANDROID__)
+    if (audioAffinityMask_ != 0) setThreadAffinityMask(audioAffinityMask_);
+#elif defined(__APPLE__)
+    // Scheduling is latency-sensitive even though actual sample rendering is
+    // owned by CoreAudio/BASS, so use the same performance-cluster bias as the
+    // visual engine rather than the background-loader policy.
+    apfa::platform::setEngineThreadPolicy();
+#endif
+
+    const std::vector<PlayEvent*>& ev = midi_.events;
+    const size_t n = ev.size();
+
+    auto clampTarget = [&](int64_t t) {
+        if (t < minTimeUs()) t = minTimeUs();
+        if (t > maxTimeUs()) t = maxTimeUs();
+        return t;
+    };
+    auto stateCursorFor = [&](int64_t t) {
+        const std::vector<size_t>& pc = midi_.programChangeIdx;
+        size_t lo = 0, hi = pc.size();
+        while (lo < hi) {
+            const size_t mid = (lo + hi) / 2;
+            if (static_cast<int64_t>(ev[pc[mid]]->absMicroSec) <= t) lo = mid + 1;
+            else hi = mid;
+        }
+        return lo;
+    };
+    auto establish = [&](int64_t t, size_t& cursor, int64_t& audioClock,
+                         int64_t& songBase, uint64_t& wallBase) {
+        t = clampTarget(t);
+        audioClock = songBase = t;
+        wallBase = nowUs();
+        cursor = cursorAfterTime(t);
+        synth_.resetForSeek();
+        restoreAudioState(stateCursorFor(t));
+        pubAudioTimeUs_.store(t, std::memory_order_release);
+        return t;
+    };
+
+    size_t audioCursor = 0;
+    int64_t audioClock = clampTarget(initialUs);
+    int64_t songBase = audioClock;
+    uint64_t wallBase = nowUs();
+    establish(audioClock, audioCursor, audioClock, songBase, wallBase);
+
+    bool wasPaused = paused_.load(std::memory_order_acquire);
+    if (wasPaused) synth_.pause();
+
+    LOGI("MIDI scheduler started: independent of visual/vsync%s",
+         audioAffinityMask_ ? ", affinity separated" : "");
+
+    while (audioRun_.load(std::memory_order_acquire) &&
+           running_.load(std::memory_order_acquire)) {
+        const int64_t requested =
+            audioSeekRequest_.exchange(INT64_MIN, std::memory_order_acq_rel);
+        if (requested != INT64_MIN) {
+            establish(requested, audioCursor, audioClock, songBase, wallBase);
+        }
+
+        const bool isPaused = paused_.load(std::memory_order_acquire);
+        const uint64_t wallNow = nowUs();
+        if (isPaused != wasPaused) {
+            if (isPaused) {
+                if (audioCursor < n)
+                    audioClock = songBase +
+                        static_cast<int64_t>(wallNow - wallBase);
+                pubAudioTimeUs_.store(audioClock, std::memory_order_release);
+                synth_.pause();
+            } else {
+                synth_.resume();
+                songBase = audioClock;
+                wallBase = wallNow;
+            }
+            wasPaused = isPaused;
+        }
+
+        if (isPaused) {
+            std::unique_lock<std::mutex> lk(audioWaitMutex_);
+            audioCv_.wait_for(lk, std::chrono::milliseconds(2));
+            continue;
+        }
+
+        if (audioCursor < n) {
+            audioClock = songBase + static_cast<int64_t>(wallNow - wallBase);
+            if (audioClock > maxTimeUs()) audioClock = maxTimeUs();
+        }
+        pubAudioTimeUs_.store(audioClock, std::memory_order_release);
+
+        const size_t first = audioCursor;
+        uint64_t localLateMax = 0;
+        while (audioCursor < n &&
+               static_cast<int64_t>(ev[audioCursor]->absMicroSec) <= audioClock) {
+            const PlayEvent* e = ev[audioCursor];
+            synth_.sendRaw(static_cast<uint8_t>(e->eventCode),
+                           e->param1, e->param2);
+            const uint64_t late = static_cast<uint64_t>(
+                audioClock - static_cast<int64_t>(e->absMicroSec));
+            if (late > localLateMax) localLateMax = late;
+            ++audioCursor;
+        }
+        if (audioCursor != first) {
+            synth_.flush();
+            audioSubmittedWindow_.fetch_add(
+                audioCursor - first, std::memory_order_relaxed);
+            uint64_t old = audioLateMaxUs_.load(std::memory_order_relaxed);
+            while (localLateMax > old &&
+                   !audioLateMaxUs_.compare_exchange_weak(
+                       old, localLateMax, std::memory_order_relaxed)) {}
+        }
+
+        // Sleep close to the next event, but never for long enough that
+        // pause/seek responsiveness depends on a distant MIDI timestamp.
+        uint64_t waitUs = 2000;
+        if (audioCursor < n) {
+            const int64_t delta =
+                static_cast<int64_t>(ev[audioCursor]->absMicroSec) - audioClock;
+            if (delta <= 150) {
+                std::this_thread::yield();
+                continue;
+            }
+            waitUs = static_cast<uint64_t>(
+                std::min<int64_t>(2000, std::max<int64_t>(100, delta - 100)));
+        }
+        std::unique_lock<std::mutex> lk(audioWaitMutex_);
+        audioCv_.wait_for(lk, std::chrono::microseconds(waitUs));
+    }
+
+    // No visual thread is allowed to touch Synth while this scheduler is live,
+    // so a final flush here is sufficient before ownership returns to shutdown.
+    synth_.flush();
+    LOGI("MIDI scheduler stopped");
+}
+
 void Engine::frame() {
-    // --- one-frame-delayed clock ---
-    // Advance by the previous frame's wall time, which now includes
-    // eglSwapBuffers — exactly as PFA's clock advances by the time including
-    // D3D Present(). GPU cost on slow hardware stretches the frame faithfully.
-    uint64_t now     = nowUs();
-    uint64_t elapsed = now - lastWall_;
+    // Visuals sample the scheduler's song clock on the separated path. On the
+    // sliced 32-bit fallback we retain the old one-frame-delayed clock because
+    // visual dispatch still owns MIDI submission there.
+    const uint64_t now = nowUs();
+    const uint64_t elapsed = now - lastWall_;
     lastWall_ = now;
-    if (eventCursor_ < midi_.events.size()) clockUs_ += static_cast<int64_t>(elapsed);
+    const bool separate = decoupledAudio_.load(std::memory_order_acquire);
+    if (separate) {
+        clockUs_ = pubAudioTimeUs_.load(std::memory_order_acquire);
+    } else if (eventCursor_ < midi_.events.size()) {
+        clockUs_ += static_cast<int64_t>(elapsed);
+    }
 
     uint64_t tDisp = nowUs();
     dispatch();
     advancePcCursor();
-    synth_.flush();   // one/few bounded raw BASS submissions for the frame
+    if (!separate)
+        synth_.flush();
     uint64_t tBuild = nowUs();
     buildVisible();
     uint64_t tEnd = nowUs();
@@ -625,8 +891,8 @@ void Engine::frame() {
     sumDispatchUs_ += dUs;  if (dUs > maxDispatchUs_) maxDispatchUs_ = dUs;
     sumBuildUs_    += bUs;  if (bUs > maxBuildUs_)    maxBuildUs_    = bUs;
 
-    // Render + present — on the engine thread, so the swap stall enters the
-    // next frame's clock advance (one-frame-delayed, same as PFA).
+    // Render + present remains visual-thread-owned. In separated mode the
+    // vblank stall affects FPS only; MIDI scheduling continues independently.
     int sw = surfW_.load(), sh = surfH_.load();
     if (sw > 0 && sh > 0) renderer_->resize(sw, sh);
     renderer_->setBgColor(bgColor_.load());
@@ -634,8 +900,8 @@ void Engine::frame() {
     renderer_->render(clockUs_ * 1e-6f, midi_.totalUs * 1e-6f,
                      pubFps_.load(),
                      3.0f * noteSpeed_, whiteInstances_, sharpInstances_, keyColor_);
-    // eglSwapBuffers is called inside renderer_->render(); it stalls here until
-    // vblank. That stall is part of lastWall_ -> now on the next frame.
+    // eglSwapBuffers is called inside renderer_->render(); it may stall here,
+    // but the MIDI scheduler and BASS update/render threads continue running.
     uint64_t tPresented = nowUs();
     uint64_t rUs = tPresented - tEnd;
     sumRenderUs_ += rUs;
@@ -677,6 +943,15 @@ void Engine::frame() {
              static_cast<unsigned long long>(sc),
              static_cast<unsigned long long>(bp),
              su / 1000.0, su * 100.0 / static_cast<double>(window));
+        if (separate) {
+            const uint64_t audioEvents =
+                audioSubmittedWindow_.exchange(0, std::memory_order_relaxed);
+            const uint64_t lateMax =
+                audioLateMaxUs_.exchange(0, std::memory_order_relaxed);
+            LOGI("audio: %llu ev submitted | scheduler late max %.3f ms",
+                 static_cast<unsigned long long>(audioEvents),
+                 lateMax / 1000.0);
+        }
         double inv = frames > 0 ? 1.0 / frames : 0.0;
         // Only when the overload guard actually had to thin the audio — a
         // silent log here means BASSMIDI kept up on its own.
@@ -733,6 +1008,8 @@ void Engine::dispatch() {
     const std::vector<PlayEvent*>& ev = midi_.events;
     const size_t n = ev.size();
     const size_t startCursor = eventCursor_;
+    const bool submitAudio =
+        !decoupledAudio_.load(std::memory_order_acquire);
 #ifdef APFA_STREAMING
     // A sliced load (32-bit, SLICED-POOL-DESIGN.md) has only one slice mapped
     // at a time, so the walk stops at its transition point and picks up in the
@@ -749,14 +1026,16 @@ void Engine::dispatch() {
             int ch  = e->channel;
             int key = e->param1;
             if (e->isNonNote()) {
-                synth_.sendRaw(static_cast<uint8_t>(e->eventCode), e->param1, e->param2);
+                if (submitAudio)
+                    synth_.sendRaw(static_cast<uint8_t>(e->eventCode),
+                                   e->param1, e->param2);
             } else if (e->isNoteOn()) {
-                synth_.noteOn(ch, key, e->param2);
+                if (submitAudio) synth_.noteOn(ch, key, e->param2);
                 active_.push_back(static_cast<int>(eventCursor_));
                 noteState_[key] = static_cast<int>(eventCursor_);
                 ++noteOnsWindow_;
             } else {
-                synth_.noteOff(ch, key);
+                if (submitAudio) synth_.noteOff(ch, key);
                 // Do not scan/erase active_ here. On dense passages this used to
                 // walk and memmove the active-note vector once PER note-off,
                 // turning dispatch into O(noteOffs * polyphony). After all due
@@ -869,9 +1148,12 @@ void Engine::buildVisible() {
 }
 
 void Engine::seek(int64_t micros) {
-    // Don't clamp here — applySeek does it against the live bounds (matching
-    // PFA's JumpTo). Negative targets are valid: they land in the pre-roll.
-    seekRequest_.store(micros);
+    // Both visual state and the independent MIDI scheduler consume their own
+    // request. Keeping two single-consumer atomics avoids a mutex or a race over
+    // one exchange(), while both converge on the same clamped target.
+    seekRequest_.store(micros, std::memory_order_release);
+    audioSeekRequest_.store(micros, std::memory_order_release);
+    audioCv_.notify_all();
 }
 
 void Engine::applySeek(int64_t target) {
@@ -921,7 +1203,8 @@ void Engine::applySeek(int64_t target) {
         LOGE("seek -> %.1f s: no slice could be mapped — playback stops here",
              target * 1e-6);
         eventCursor_ = windowCursor_ = n;
-        synth_.allNotesOff();
+        if (!decoupledAudio_.load(std::memory_order_acquire))
+            synth_.allNotesOff();
         pubTimeUs_.store(static_cast<int64_t>(clockUs_));
         return;
     }
@@ -962,14 +1245,16 @@ void Engine::applySeek(int64_t target) {
 #endif
     }
 
-    synth_.allNotesOff();
-    
+    const bool separate = decoupledAudio_.load(std::memory_order_acquire);
     size_t oldPcCursor = pcCursor_;
     advancePcCursor();
-    playSkippedEvents(oldPcCursor);
-    synth_.flush();
+    if (!separate) {
+        synth_.allNotesOff();
+        playSkippedEvents(oldPcCursor);
+        synth_.flush();
+    }
 
-    pubTimeUs_.store(static_cast<int64_t>(clockUs_));
+    pubTimeUs_.store(static_cast<int64_t>(clockUs_), std::memory_order_release);
     LOGI("seek -> %.1f s, %zu active", target * 1e-6, active_.size());
 }
 
