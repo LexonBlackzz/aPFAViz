@@ -657,8 +657,12 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
             enableSensorHighlight = false
             enableAdaptiveTint = false
             enableDynamicBackground = false
-            enablePressEffect = interactive
-            pressScale = if (interactive) 0.965f else 1f
+            // LiquidGlass' elasticity stretches the axis toward the held/dragged
+            // point, then springs back. Passive cards get a subtle amount; the
+            // primary Play control gets the more obvious liquid response.
+            enablePressEffect = true
+            pressScale = if (interactive) 0.99f else 0.997f
+            elasticity = if (interactive) 0.58f else 0.24f
             collectFrameStats = false
             backdropSource = backdrop
             setGlassTint(tint, strength)
@@ -802,6 +806,7 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
             setOnClickListener { togglePause() }
         }
         styleTransportButton(pauseButton)
+        addLightElasticTouch(pauseButton)
         bar.addView(pauseButton, LinearLayout.LayoutParams(dp(48), dp(48)).apply {
             marginStart = dp(8)
         })
@@ -1009,6 +1014,45 @@ class PlaybackActivity : Activity(), SurfaceHolder.Callback {
             setColor(Color.argb(226, 18, 21, 32))
             setStroke(dp(1), Color.argb(105, 139, 92, 246))
         }
+
+    private fun addLightElasticTouch(view: View) {
+        var downX = 0f
+        var downY = 0f
+        view.setOnTouchListener { v, event ->
+            when (event.actionMasked) {
+                android.view.MotionEvent.ACTION_DOWN -> {
+                    downX = event.x
+                    downY = event.y
+                    v.pivotX = event.x
+                    v.pivotY = event.y
+                    val nx = if (v.width > 0) (event.x / v.width - 0.5f) else 0f
+                    val ny = if (v.height > 0) (event.y / v.height - 0.5f) else 0f
+                    v.animate().cancel()
+                    v.scaleX = 1f + kotlin.math.abs(nx) * 0.035f
+                    v.scaleY = 1f + kotlin.math.abs(ny) * 0.035f
+                }
+                android.view.MotionEvent.ACTION_MOVE -> {
+                    if (v.width > 0 && v.height > 0) {
+                        v.pivotX = event.x.coerceIn(0f, v.width.toFloat())
+                        v.pivotY = event.y.coerceIn(0f, v.height.toFloat())
+                        val dx = kotlin.math.abs(event.x - downX) / v.width
+                        val dy = kotlin.math.abs(event.y - downY) / v.height
+                        v.scaleX = 1f + dx.coerceAtMost(1f) * 0.045f
+                        v.scaleY = 1f + dy.coerceAtMost(1f) * 0.045f
+                    }
+                }
+                android.view.MotionEvent.ACTION_UP,
+                android.view.MotionEvent.ACTION_CANCEL -> {
+                    v.animate()
+                        .scaleX(1f)
+                        .scaleY(1f)
+                        .setDuration(180L)
+                        .start()
+                }
+            }
+            false
+        }
+    }
 
     private fun styleTransportButton(button: Button) {
         val shape = GradientDrawable().apply {
