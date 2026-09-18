@@ -615,6 +615,226 @@ void Engine::threadMain() {
     playing_ = false;
 }
 
+size_t Engine::cursorAfterTime(int64_t target) const {
+    const std::vector<PlayEvent*>& ev = midi_.events;
+    size_t lo = 0, hi = ev.size();
+    while (lo < hi) {
+        const size_t mid = (lo + hi) / 2;
+        if (static_cast<int64_t>(ev[mid]->absMicroSec) <= target) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo;
+}
+
+void Engine::restoreAudioState(size_t stateCursor) {
+    // Select the LAST value of every controller/program/pitch behind the seek
+    // target, then replay only those selected writes in their ORIGINAL
+    // chronological order. This preserves bank/program relationships better
+    // than issuing the reverse scan directly.
+    struct Raw {
+        uint8_t code, p1, p2;
+    };
+    struct Selected {
+        size_t order;
+        Raw raw;
+    };
+
+    bool haveControl[16][128] = {};
+    bool haveProgram[16] = {};
+    bool havePitch[16] = {};
+    std::vector<Selected> selected;
+    selected.reserve(16 * 16);
+
+    const std::vector<size_t>& pc = midi_.programChangeIdx;
+    if (stateCursor > pc.size()) stateCursor = pc.size();
+
+    for (size_t i = stateCursor; i > 0; --i) {
+        const size_t order = pc[i - 1];
+        const PlayEvent* e = midi_.events[order];
+        const uint8_t code = static_cast<uint8_t>(e->eventCode);
+        const int ch = code & 0x0f;
+        const int type = code >> 4;
+
+        if (type == kController) {
+            if (haveControl[ch][e->param1]) continue;
+            haveControl[ch][e->param1] = true;
+        } else if (type == kProgramChange) {
+            if (haveProgram[ch]) continue;
+            haveProgram[ch] = true;
+        } else if (type == kPitchBend) {
+            if (havePitch[ch]) continue;
+            havePitch[ch] = true;
+        } else {
+            continue;
+        }
+        selected.push_back(Selected{
+            order, Raw{code, e->param1, e->param2}
+        });
+    }
+
+    std::sort(selected.begin(), selected.end(),
+              [](const Selected& a, const Selected& b) {
+                  return a.order < b.order;
+              });
+    for (const Selected& e : selected)
+        synth_.sendRaw(e.raw.code, e.raw.p1, e.raw.p2);
+    synth_.flush();
+}
+
+void Engine::startAudioScheduler(int64_t initialUs, uint64_t affinityMask) {
+    if (audioRun_.exchange(true, std::memory_order_acq_rel)) return;
+    audioAffinityMask_ = affinityMask;
+    audioSeekRequest_.store(INT64_MIN, std::memory_order_relaxed);
+    pubAudioTimeUs_.store(initialUs, std::memory_order_release);
+    try {
+        audioThread_ = std::thread(&Engine::audioMain, this, initialUs);
+    } catch (...) {
+        audioRun_.store(false, std::memory_order_release);
+        decoupledAudio_.store(false, std::memory_order_release);
+        LOGE("could not create MIDI scheduler thread — using coupled fallback");
+    }
+}
+
+void Engine::stopAudioScheduler() {
+    if (!audioRun_.exchange(false, std::memory_order_acq_rel)) return;
+    audioCv_.notify_all();
+    if (audioThread_.joinable()) audioThread_.join();
+}
+
+void Engine::audioMain(int64_t initialUs) {
+#if defined(__ANDROID__)
+    if (audioAffinityMask_ != 0) setThreadAffinityMask(audioAffinityMask_);
+#elif defined(__APPLE__)
+    // Scheduling is latency-sensitive even though actual sample rendering is
+    // owned by CoreAudio/BASS, so use the same performance-cluster bias as the
+    // visual engine rather than the background-loader policy.
+    apfa::platform::setEngineThreadPolicy();
+#endif
+
+    const std::vector<PlayEvent*>& ev = midi_.events;
+    const size_t n = ev.size();
+
+    auto clampTarget = [&](int64_t t) {
+        if (t < minTimeUs()) t = minTimeUs();
+        if (t > maxTimeUs()) t = maxTimeUs();
+        return t;
+    };
+    auto stateCursorFor = [&](int64_t t) {
+        const std::vector<size_t>& pc = midi_.programChangeIdx;
+        size_t lo = 0, hi = pc.size();
+        while (lo < hi) {
+            const size_t mid = (lo + hi) / 2;
+            if (static_cast<int64_t>(ev[pc[mid]]->absMicroSec) <= t) lo = mid + 1;
+            else hi = mid;
+        }
+        return lo;
+    };
+    auto establish = [&](int64_t t, size_t& cursor, int64_t& audioClock,
+                         int64_t& songBase, uint64_t& wallBase) {
+        t = clampTarget(t);
+        audioClock = songBase = t;
+        wallBase = nowUs();
+        cursor = cursorAfterTime(t);
+        synth_.resetForSeek();
+        restoreAudioState(stateCursorFor(t));
+        pubAudioTimeUs_.store(t, std::memory_order_release);
+        return t;
+    };
+
+    size_t audioCursor = 0;
+    int64_t audioClock = clampTarget(initialUs);
+    int64_t songBase = audioClock;
+    uint64_t wallBase = nowUs();
+    establish(audioClock, audioCursor, audioClock, songBase, wallBase);
+
+    bool wasPaused = paused_.load(std::memory_order_acquire);
+    if (wasPaused) synth_.pause();
+
+    LOGI("MIDI scheduler started: independent of visual/vsync%s",
+         audioAffinityMask_ ? ", affinity separated" : "");
+
+    while (audioRun_.load(std::memory_order_acquire) &&
+           running_.load(std::memory_order_acquire)) {
+        const int64_t requested =
+            audioSeekRequest_.exchange(INT64_MIN, std::memory_order_acq_rel);
+        if (requested != INT64_MIN) {
+            establish(requested, audioCursor, audioClock, songBase, wallBase);
+        }
+
+        const bool isPaused = paused_.load(std::memory_order_acquire);
+        const uint64_t wallNow = nowUs();
+        if (isPaused != wasPaused) {
+            if (isPaused) {
+                if (audioCursor < n)
+                    audioClock = songBase +
+                        static_cast<int64_t>(wallNow - wallBase);
+                pubAudioTimeUs_.store(audioClock, std::memory_order_release);
+                synth_.pause();
+            } else {
+                synth_.resume();
+                songBase = audioClock;
+                wallBase = wallNow;
+            }
+            wasPaused = isPaused;
+        }
+
+        if (isPaused) {
+            std::unique_lock<std::mutex> lk(audioWaitMutex_);
+            audioCv_.wait_for(lk, std::chrono::milliseconds(2));
+            continue;
+        }
+
+        if (audioCursor < n) {
+            audioClock = songBase + static_cast<int64_t>(wallNow - wallBase);
+            if (audioClock > maxTimeUs()) audioClock = maxTimeUs();
+        }
+        pubAudioTimeUs_.store(audioClock, std::memory_order_release);
+
+        const size_t first = audioCursor;
+        uint64_t localLateMax = 0;
+        while (audioCursor < n &&
+               static_cast<int64_t>(ev[audioCursor]->absMicroSec) <= audioClock) {
+            const PlayEvent* e = ev[audioCursor];
+            synth_.sendRaw(static_cast<uint8_t>(e->eventCode),
+                           e->param1, e->param2);
+            const uint64_t late = static_cast<uint64_t>(
+                audioClock - static_cast<int64_t>(e->absMicroSec));
+            if (late > localLateMax) localLateMax = late;
+            ++audioCursor;
+        }
+        if (audioCursor != first) {
+            synth_.flush();
+            audioSubmittedWindow_.fetch_add(
+                audioCursor - first, std::memory_order_relaxed);
+            uint64_t old = audioLateMaxUs_.load(std::memory_order_relaxed);
+            while (localLateMax > old &&
+                   !audioLateMaxUs_.compare_exchange_weak(
+                       old, localLateMax, std::memory_order_relaxed)) {}
+        }
+
+        // Sleep close to the next event, but never for long enough that
+        // pause/seek responsiveness depends on a distant MIDI timestamp.
+        uint64_t waitUs = 2000;
+        if (audioCursor < n) {
+            const int64_t delta =
+                static_cast<int64_t>(ev[audioCursor]->absMicroSec) - audioClock;
+            if (delta <= 150) {
+                std::this_thread::yield();
+                continue;
+            }
+            waitUs = static_cast<uint64_t>(
+                std::min<int64_t>(2000, std::max<int64_t>(100, delta - 100)));
+        }
+        std::unique_lock<std::mutex> lk(audioWaitMutex_);
+        audioCv_.wait_for(lk, std::chrono::microseconds(waitUs));
+    }
+
+    // No visual thread is allowed to touch Synth while this scheduler is live,
+    // so a final flush here is sufficient before ownership returns to shutdown.
+    synth_.flush();
+    LOGI("MIDI scheduler stopped");
+}
+
 void Engine::frame() {
     // --- one-frame-delayed clock ---
     // Advance by the previous frame's wall time, which now includes
