@@ -3,6 +3,7 @@
 #include "note.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <new>
@@ -382,6 +383,17 @@ void Engine::stop() {
 void Engine::surfaceChanged(int w, int h) {
     surfW_ = w;
     surfH_ = h;
+}
+
+void Engine::pause() {
+    paused_.store(true, std::memory_order_release);
+    pubNps_.store(0.0f, std::memory_order_relaxed);
+    audioCv_.notify_all();
+}
+
+void Engine::resume() {
+    paused_.store(false, std::memory_order_release);
+    audioCv_.notify_all();
 }
 
 #if defined(__ANDROID__)
@@ -869,9 +881,12 @@ void Engine::buildVisible() {
 }
 
 void Engine::seek(int64_t micros) {
-    // Don't clamp here — applySeek does it against the live bounds (matching
-    // PFA's JumpTo). Negative targets are valid: they land in the pre-roll.
-    seekRequest_.store(micros);
+    // Both visual state and the independent MIDI scheduler consume their own
+    // request. Keeping two single-consumer atomics avoids a mutex or a race over
+    // one exchange(), while both converge on the same clamped target.
+    seekRequest_.store(micros, std::memory_order_release);
+    audioSeekRequest_.store(micros, std::memory_order_release);
+    audioCv_.notify_all();
 }
 
 void Engine::applySeek(int64_t target) {
