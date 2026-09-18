@@ -140,3 +140,7 @@ inline void defaultPalettePFA(uint32_t palette[16]) {
         hsvToRgbPFA(360 * i / iColors, S, V, R, G, B);
         palette[count] = packRGB(R, G, B);
     }
+    std::swap(palette[2], palette[4]);   // PFA swaps slots 2 and 4
+}
+
+}  // namespace apfa
