@@ -786,9 +786,9 @@ std::vector<SlicePlan> planSlices(const std::vector<uint32_t>& sisterPos,
         // we would have to copy in as well.
         uint32_t s = sisterPos[pos];
         uint32_t soundingAfter = sounding;
-        if (s == Streamer::kSisNoteOff) {
+        if (Streamer::linkIsNoteOff(s)) {
             if (soundingAfter > 0) soundingAfter--;
-        } else if (s != Streamer::kSisNonNote) {
+        } else if (Streamer::linkIsNoteOn(s)) {
             soundingAfter++;
         }
         uint64_t costIfTaken = static_cast<uint64_t>(cur.carryIn)
@@ -923,7 +923,7 @@ bool Streamer::open(const std::string& midiPath, MidiData& out,
 
     size_t totalEvents = 0;
     for (size_t c : skim.trackCounts) totalEvents += c;
-    if (totalEvents == 0 || totalEvents >= kSisNoteOff ||
+    if (totalEvents == 0 || totalEvents >= kLinkNoteOffFlag ||
         totalEvents > (SIZE_MAX / kEventSize) - kPageSize) {
         munmap(midiMap, fileSize);
         LOGE("streamer: unusable event count %zu", totalEvents);
@@ -1492,11 +1492,13 @@ bool Streamer::open(const std::string& midiPath, MidiData& out,
         for (size_t pos = 0; pos < totalEvents; pos++)
             inv[sliced ? poolIdx_[pos] : poolOffOf(out.events[pos]) / kEventSize] =
                 static_cast<uint32_t>(pos);
-        sisterPos_.assign(totalEvents, kSisNonNote);
+        sisterPos_.assign(totalEvents, kLinkNonNote);
         if (!chunked) {
             for (const Pair& pr : emit.pairBuf) {
-                sisterPos_[inv[pr.onIdx]]  = inv[pr.offIdx];
-                sisterPos_[inv[pr.offIdx]] = kSisNoteOff;
+                const uint32_t onPos  = inv[pr.onIdx];
+                const uint32_t offPos = inv[pr.offIdx];
+                sisterPos_[onPos]  = offPos;
+                sisterPos_[offPos] = kLinkNoteOffFlag | onPos;
             }
             emit.pairBuf.clear();
             emit.pairBuf.shrink_to_fit();
@@ -1516,8 +1518,10 @@ bool Streamer::open(const std::string& midiPath, MidiData& out,
                     return false;
                 }
                 for (size_t i = 0; i < n; i++) {
-                    sisterPos_[inv[chunk[i].onIdx]]  = inv[chunk[i].offIdx];
-                    sisterPos_[inv[chunk[i].offIdx]] = kSisNoteOff;
+                    const uint32_t onPos  = inv[chunk[i].onIdx];
+                    const uint32_t offPos = inv[chunk[i].offIdx];
+                    sisterPos_[onPos]  = offPos;
+                    sisterPos_[offPos] = kLinkNoteOffFlag | onPos;
                 }
                 done += n;
             }
@@ -1551,7 +1555,7 @@ bool Streamer::open(const std::string& midiPath, MidiData& out,
         // find by walking events[] when nothing is mapped yet.
         firstNoteUs_ = 0;
         for (size_t pos = 0; pos < totalEvents; pos++)
-            if (sisterPos_[pos] < kSisNoteOff) {
+            if (linkIsNoteOn(sisterPos_[pos])) {
                 firstNoteUs_ = static_cast<int64_t>(posUs_[pos]);
                 break;
             }
@@ -1664,7 +1668,7 @@ bool Streamer::open(const std::string& midiPath, MidiData& out,
         // that comes with it, then materialise the first one so playback can
         // start the moment load() returns.
         uint32_t budget = static_cast<uint32_t>(std::min<size_t>(
-            arenaEvents() * kSliceBudgetNum / kSliceBudgetDen, kSisNoteOff - 1));
+            arenaEvents() * kSliceBudgetNum / kSliceBudgetDen, kLinkPosMask));
         plan_ = planSlices(sisterPos_, budget, kSliceMinEvents);
         size_t worst = 0;
         for (const SlicePlan& spn : plan_)
@@ -1898,8 +1902,8 @@ bool Streamer::buildSlice(int sliceIdx, SliceMap& out) {
     size_t sounding = 0;
     for (size_t pos = 0; pos < endPos; pos++) {
         uint32_t s = sisterPos_[pos];
-        if (s == kSisNonNote) continue;
-        if (s == kSisNoteOff) { if (sounding) sounding--; continue; }
+        if (linkIsNonNote(s)) continue;
+        if (linkIsNoteOff(s)) { if (sounding) sounding--; continue; }
         sounding++;
         if (pos < firstPos && static_cast<size_t>(s) >= firstPos)
             carryIn.push_back(static_cast<uint32_t>(pos));
@@ -1920,8 +1924,8 @@ bool Streamer::buildSlice(int sliceIdx, SliceMap& out) {
         if (static_cast<int64_t>(posUs_[matEnd]) > limitUs) break;
         uint32_t s = sisterPos_[matEnd];
         size_t after = sounding;
-        if (s == kSisNoteOff) { if (after) after--; }
-        else if (s != kSisNonNote) after++;
+        if (linkIsNoteOff(s)) { if (after) after--; }
+        else if (linkIsNoteOn(s)) after++;
         if (carryIn.size() + (matEnd + 1 - firstPos) + after > cap) break;
         sounding = after;
         matEnd++;
@@ -1934,8 +1938,8 @@ bool Streamer::buildSlice(int sliceIdx, SliceMap& out) {
     carryOut.reserve(sounding);
     for (size_t pos = 0; pos < matEnd; pos++) {
         uint32_t s = sisterPos_[pos];
-        if (s < kSisNoteOff && static_cast<size_t>(s) >= matEnd)
-            carryOut.push_back(s);
+        if (linkIsNoteOn(s) && static_cast<size_t>(linkPartner(s)) >= matEnd)
+            carryOut.push_back(linkPartner(s));
     }
     std::sort(carryOut.begin(), carryOut.end());
 
@@ -2147,8 +2151,9 @@ void Streamer::installSliceLocked(SliceMap& s, int64_t playheadUs) {
     // over their positions in this slice.
     for (size_t i = 0; i < s.carryPos.size(); i++) {
         if (s.carryPos[i] >= s.firstPos) break;      // carry-out, sorted after
-        uint32_t off = sisterPos_[s.carryPos[i]];
-        if (off >= kSisNoteOff) continue;
+        uint32_t offLink = sisterPos_[s.carryPos[i]];
+        if (!linkIsNoteOn(offLink)) continue;
+        uint32_t off = linkPartner(offLink);
         uintptr_t a = reinterpret_cast<uintptr_t>(
             base + static_cast<size_t>(s.carrySlot[i]) * kEventSize);
         uintptr_t p1 = a & ~(kPageSize - 1);
@@ -2466,10 +2471,10 @@ void Streamer::loaderTickLocked(int64_t t) {
     size_t sisterLeft = kMaxSisterTouchPerTick;
     for (size_t pos = frontPos_; pos < newFront; pos++) {
         uint32_t s = sisterPos_[pos];
-        if (s < kSisNoteOff && static_cast<size_t>(s) > newFront) {
+        if (linkIsNoteOn(s) && static_cast<size_t>(linkPartner(s)) > newFront) {
             if (sisterLeft == 0) continue;
             sisterLeft--;
-            const uint8_t* off = reinterpret_cast<const uint8_t*>(ev[s]);
+            const uint8_t* off = reinterpret_cast<const uint8_t*>(ev[linkPartner(s)]);
             touchRange(off, off + kEventSize - 1);
         }
     }
@@ -2481,15 +2486,15 @@ void Streamer::loaderTickLocked(int64_t t) {
     size_t newBack = std::min(coarsePosOf(t - backUs_), n);
     for (size_t pos = backPos_; pos < newBack; pos++) {
         uint32_t s = sisterPos_[pos];
-        if (s < kSisNoteOff && static_cast<size_t>(s) > curPos) {
+        if (linkIsNoteOn(s) && static_cast<size_t>(linkPartner(s)) > curPos) {
             uintptr_t page = reinterpret_cast<uintptr_t>(ev[pos]) & ~(kPageSize - 1);
             uintptr_t page2 = (reinterpret_cast<uintptr_t>(ev[pos]) + kEventSize - 1)
                               & ~(kPageSize - 1);
             auto& rel = pinnedPages_[page];
-            if (s > rel) rel = s;
+            if (linkPartner(s) > rel) rel = linkPartner(s);
             if (page2 != page) {
                 auto& rel2 = pinnedPages_[page2];
-                if (s > rel2) rel2 = s;
+                if (linkPartner(s) > rel2) rel2 = linkPartner(s);
             }
         }
     }
@@ -2600,8 +2605,8 @@ void Streamer::warmSeek(int64_t targetUs, int64_t visibleEndUs,
     }
     for (size_t pos = p0; pos < p1; pos++) {
         uint32_t s = sisterPos_[pos];
-        if (s < kSisNoteOff && static_cast<size_t>(s) > p1) {
-            const uint8_t* off = reinterpret_cast<const uint8_t*>(ev[s]);
+        if (linkIsNoteOn(s) && static_cast<size_t>(linkPartner(s)) > p1) {
+            const uint8_t* off = reinterpret_cast<const uint8_t*>(ev[linkPartner(s)]);
             touchRange(off, off + kEventSize - 1);
         }
     }
@@ -2613,17 +2618,17 @@ void Streamer::warmSeek(int64_t targetUs, int64_t visibleEndUs,
         const uint8_t* on = reinterpret_cast<const uint8_t*>(ev[pos]);
         touchRange(on, on + kEventSize - 1);
         uint32_t s = sisterPos_[pos];
-        if (s < kSisNoteOff) {
-            const uint8_t* off = reinterpret_cast<const uint8_t*>(ev[s]);
+        if (linkIsNoteOn(s)) {
+            const uint8_t* off = reinterpret_cast<const uint8_t*>(ev[linkPartner(s)]);
             touchRange(off, off + kEventSize - 1);
             uintptr_t page = reinterpret_cast<uintptr_t>(on) & ~(kPageSize - 1);
             uintptr_t page2 = (reinterpret_cast<uintptr_t>(on) + kEventSize - 1)
                               & ~(kPageSize - 1);
             auto& rel = pinnedPages_[page];
-            if (s > rel) rel = s;
+            if (linkPartner(s) > rel) rel = linkPartner(s);
             if (page2 != page) {
                 auto& rel2 = pinnedPages_[page2];
-                if (s > rel2) rel2 = s;
+                if (linkPartner(s) > rel2) rel2 = linkPartner(s);
             }
         }
     }
